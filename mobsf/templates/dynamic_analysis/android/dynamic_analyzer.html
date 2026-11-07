@@ -6,12 +6,12 @@
 {% endblock %}
 {% block extra_css %}
 <link rel="stylesheet" href="{% static "others/css/terminal.css" %}" type="text/css">
-<link rel="stylesheet" href="{% static "others/css/devices.min.css" %}" type="text/css">
 <link rel="stylesheet" href="{% static "codemirror/codemirror.css" %}" type="text/css">
+<link rel="stylesheet" href="{% static "enlighterjs/enlighterjs.min.css" %}" />
 <link rel="stylesheet" href="{% static "codemirror/lint.css" %}" type="text/css">
 <link rel="stylesheet" href="{% static "others/css/spinner.css" %}">
 <style>
-     textarea {
+     #stat {
         width: 100%;
         height: {% if android_version < 5 %} 630px; {% else %} 170px; {% endif %}
         -moz-border-bottom-colors: none;
@@ -32,21 +32,121 @@
         padding: 5px 8px;
         transition: background-color 0.2s ease 0s;
     }
-    textarea:focus {
+    #stat:focus {
         background: none repeat scroll 0 0 #FFFFFF;
         outline-width: 0;
     }
     .highlight { border: solid 2px #1e6dff;}
+    
+    #code-editor{
+      transform: scale(1.25) !important;
+      transform-origin: top left;
+      width: 80%;
+      height: auto;
+      overflow: auto;
+      max-height: 600px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 10px;
+      background: #f8f9fa;
+      margin-bottom: 150px;
+      position: relative;
+      z-index: 1;
+      scrollbar-width: none; /* Firefox */
+      -ms-overflow-style: none; /* Internet Explorer 10+ */
+    }
+    
+    #code-editor::-webkit-scrollbar {
+      display: none; /* Chrome, Safari, Opera */
+    }
     .CodeMirror {
         height: 610px;
-        font-size: 13px;
+        font-size: 11px;
         border: 1px solid #eee;
       }
 
-      .frida-pre {
-        font-family: "courier new", courier, monospace;
-        font-size: 11px;
+    .frida-pre {
+      font-family: "courier new", courier, monospace;
+      font-size: 11px;
+    }
+
+    #start_activity{
+        margin-top: 5px;
+    }
+    #start_activity_form{
+        margin-top: 10px;
+    }
+
+    .device-preview {
+      box-sizing: border-box;
+      width: 420px;
+      max-width: calc(100% - 24px);
+      margin: 0 auto;
+      padding: 10px;
+      overflow: hidden;
+      background: #111827;
+      border: 1px solid #374151;
+      border-radius: 24px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+      transition: width 0.2s ease;
+    }
+
+    .device-preview.landscape {
+      max-width: calc(100% - 24px);
+    }
+
+    .device-preview-screen {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin: 0 auto;
+      background: #000;
+      border-radius: 14px;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+
+    .device-navigation {
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      margin-top: 8px;
+      padding: 4px 16px 0;
+    }
+
+    .device-nav-button {
+      width: 52px;
+      height: 36px;
+      color: #f9fafb;
+      background: transparent;
+      border: 0;
+      border-radius: 10px;
+      transition: background-color 0.15s ease, opacity 0.15s ease;
+    }
+
+    .device-nav-button:hover:not(:disabled),
+    .device-nav-button:focus:not(:disabled) {
+      background: #374151;
+      outline: none;
+    }
+
+    .device-nav-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.35;
+    }
+
+    @media (max-width: 576px) {
+      .device-preview {
+        max-width: 100%;
+        padding: 6px;
+        border-radius: 16px;
       }
+      .device-preview-screen {
+        border-radius: 10px;
+      }
+    }
+
 </style>
 
 {% endblock %}
@@ -58,18 +158,35 @@
 <div class="content-wrapper">
   <div class="content-header">
     <div class="container-fluid">
-      <div class="row mb-2">
-        <div id="mobsf_header">
-            <h2><strong>Dynamic Analyzer </strong>- {{ package }}</h2>
-          <input type="hidden" id="screen_width" value="{{ screen_witdth }}">
-          <input type="hidden" id="screen_height" value="{{ screen_height }}">
+      <div class="row mb-2 align-items-start">
+        <div id="mobsf_header" class="col-md-8">
+          <h2><strong>Dynamic Analyzer </strong>- {{ package }}</h2>
+        </div>
+        <div class="col-md-4 text-md-right pt-2">
+          <strong>Device:</strong>
+          {% if device_model %}{{ device_model }} — {% endif %}{{ device_identifier }}
+          <span class="badge badge-secondary">{{ device_mode|title }}</span>
         </div>
       </div>
     </div>
   </div>
    <div class="container-fluid">
 
-   
+   {% if device_mode == "gadget" %}
+   <div class="alert alert-warning">
+     {% if root_ca_embedded %}
+     This session uses an APK injected with Frida Gadget and MobSF Root CA.
+     XML network-security pins are removed.
+     {% else %}
+     This split APK session uses an APK injected with Frida Gadget. Split
+     resources are preserved, so the MobSF Root CA is not embedded.
+     {% endif %}
+     The app may not work if it uses custom signature checks, Play Integrity,
+     certificate pinning, or requires its original code signing certificate.
+     Those checks must be patched separately.
+   </div>
+   {% endif %}
+
    <div class="row">
           <div class="col-md-12">
             <div class="card card-default">
@@ -77,10 +194,14 @@
               <div class="card-body">
                  <div id="but" align="center">
                   <a href="#" id="screen" class="btn btn-primary" role="button"><i class="fa fa-mobile-alt"></i> Show Screen</a>
+                  {% if device_mode != "gadget" %}
                   <a href="#" id="rootca" class="btn btn-primary" role="button"><i class="fa fa-certificate"></i> Remove Root CA</a>
+                  {% endif %}
                   {% if android_version >= 5 %}
                   <a href="#" id="proxy" class="btn btn-primary" role="button"><i class="fas fa-eye-slash"></i> Unset HTTP(S) Proxy</a>
+                  {% if tls_tests_available %}
                   <a href="#" id="tls_test" class="btn btn-primary" role="button"  data-toggle="modal" data-target="#tls_modal"><i class="fa fa-lock"></i> TLS/SSL Security Tester</a>
+                  {% endif %}
                   {% endif %}
                   <a href="#" id="expactt" class="btn btn-primary" role="button"><i class="fa fa-language"></i> Exported Activity Tester</a>
                   <a href="#" id="actt" class="btn btn-primary" role="button"><i class="fa fa-rocket"></i> Activity Tester</a>
@@ -89,7 +210,8 @@
                   {% endif %}
                   <a href="#" id="ss" class="btn btn-primary" role="button"><i class="fa fa-camera"></i> Take a Screenshot</a>
                   <a href="#" id="logstream" class="btn btn-primary"><i class="fa fa-water"></i> Logcat Stream</a>
-                  <a href="../../live_api/?hash={{ hash }}&amp;package={{ package }}" id="apimon" target="_blank" class="btn btn-primary" style='display: none'><i class="fa fa-search"></i> Live API Monitor</a>
+                  <a href="{% url 'httptools' %}?project={{ package }}" target="_blank" class="btn btn-primary" role="button"><i class="fa fa-globe"></i> Live Web Traffic</a>
+                  <a href="{% url 'live_api' %}?hash={{ hash }}&amp;package={{ package }}" id="apimon" target="_blank" class="btn btn-primary" style='display: none'><i class="fa fa-search"></i> Live API Monitor</a>
                   <a href="#" id="stop" class="btn btn-info" role="button" ><i class="fa fa-file-alt"></i> Generate Report</a>
                 </div>
               </div>
@@ -100,21 +222,40 @@
           <!-- /.col -->
 
 
-          <div class="col-md-4">
+          <div class="col-md-3">
             <div class="card card-default">
               <!-- /.card-header -->
               <div class="card-body">
                 <div align="center">
-                  <div class="marvel-device htc-one">
-                  <div class="top-bar"></div>
-                  <div class="camera"></div>
-                  <div class="sensor"></div>
-                  <div class="speaker"></div>
-                  <div class="screen" id="container">
-                  <img width="320" height="580" src="../../download/screen/screen.png" id="my" onerror="$('#my').attr('src','/static/img/loading.jpg')" style="background-color:black;">
-                  </div>
+                  <div class="device-preview" id="container" tabindex="0" style="outline: none;">
+                    <img src="{% url 'download' %}screen/screen.png" class="device-preview-screen" id="my" draggable="false" alt="Android device screen" onerror="$('#my').attr('src','/static/img/loading.jpg')">
+                    <div class="device-navigation" aria-label="Android navigation controls">
+                      <button type="button" class="device-nav-button" data-android-key="back" title="Back" aria-label="Back" disabled>
+                        <i class="fas fa-chevron-left"></i>
+                      </button>
+                      <button type="button" class="device-nav-button" data-android-key="home" title="Home" aria-label="Home" disabled>
+                        <i class="far fa-circle"></i>
+                      </button>
+                      <button type="button" class="device-nav-button" data-android-key="recents" title="App Switcher" aria-label="App Switcher" disabled>
+                        <i class="far fa-square"></i>
+                      </button>
+                    </div>
                   </div>
                 </div>
+
+                <div class="card-body">
+                  <p>
+                  <div class="input-group input-group-sm">
+                    <input class="form-control form-control-navbar" id="android_text" type="text" placeholder="Text Input" >
+                    <div class="input-group-append">
+                      <button id="android_text_btn" class="btn btn-primary">
+                        <i class="far fa-paper-plane"></i>
+                      </button>
+                    </div>
+                  </div>
+                </p>
+              </div>
+
               </div>
               <!-- /.card-body -->
             </div>
@@ -122,7 +263,7 @@
           </div>
           <!-- /.col -->
 
-           <div class="col-md-{% if android_version < 5 %}8{% else %}4{% endif %}">
+           <div class="col-md-{% if android_version < 5 %}9{% else %}4{% endif %}">
             <div class="card card-default">
               <!-- /.card-header -->
               <div class="card-body">
@@ -132,9 +273,6 @@
                 <ul class="nav nav-tabs" id="tabnav" role="tablist">
                   <li class="nav-item">
                     <a class="nav-link active" id="dm-tab" data-toggle="pill" href="#dm" role="tab" aria-controls="dm" aria-selected="true">Dynamic Analyzer</a>
-                  </li>
-                  <li class="nav-item">
-                    <a class="nav-link disabled" id="frida-tab" data-toggle="pill" href="#frida_logs" role="tab" aria-controls="frida" aria-selected="false">Frida Logs</a>
                   </li>
                   <li class="nav-item">
                     <a class="nav-link" id="errors-tab" data-toggle="pill" href="#errors" role="tab" aria-controls="errors" aria-selected="false">Errors</a>
@@ -151,37 +289,39 @@
                 <button id="run_app" class="btn btn-success"><i class="fas fa-play"></i> Run App</button>
                 {% endif %}
                 <!--box-->
-                <div id="frida_options" class="box box-primary">
-                    <div class="box-header with-border">
-                      <h3 class="box-title">Frida Scripts</h3>
-                    </div>
+                <div class="box box-primary">
                     <!-- /.box-header -->
                     <!-- form start -->
                     <form role="form">
                       <div class="box-body">
-                        <div class="form-group">
-                            <hr/>
-                        <h4> Default </h4>
-                          <label>
-                              <input name="default_hooks" type="checkbox" value="api_monitor" checked>
-                              API Monitoring 
-                            </label>
-                             <label>
-                              <input name="default_hooks" type="checkbox" value="ssl_pinning_bypass" checked>
-                              SSL Pinning Bypass 
-                            </label>
-                             <label>
-                             <input name="default_hooks" type="checkbox"  value="root_bypass" checked>
-                              Root Detection Bypass 
-                            </label>
-                             <label>
-                            <input name="default_hooks" type="checkbox" value="debugger_check_bypass" checked>
-                              Debugger Check Bypass
-                            </label>
-                        </div>
-                                           <hr/>
-                        <div class="form-group">
-                        <h4> Auxiliary </h4>
+                      <div id="frida_options">
+                        <hr/>
+                          <div class="form-group">
+                          <h4> Default Frida Scripts </h4>
+                            <label>
+                                <input name="default_hooks" type="checkbox" value="api_monitor" checked>
+                                API Monitoring 
+                              </label>
+                              <label>
+                                <input name="default_hooks" type="checkbox" value="ssl_pinning_bypass" checked>
+                                SSL Pinning Bypass 
+                              </label>
+                              <label>
+                              <input name="default_hooks" type="checkbox"  value="root_bypass" checked>
+                                Root Detection Bypass 
+                              </label>
+                              <label>
+                              <input name="default_hooks" type="checkbox" value="debugger_check_bypass" checked>
+                                Debugger Check Bypass
+                              </label>
+                              <label>
+                                <input name="default_hooks" type="checkbox" value="dump_clipboard" checked>
+                                Clipboard Monitor
+                                </label>
+                          </div>
+                        <hr/>
+                       <div class="form-group">
+                        <h4> Auxiliary Frida Scripts</h4>
                             <label>
                             <input name="auxiliary" type="checkbox" value="enum_class" id="enum_class">
                               Enumerate Loaded Classes
@@ -211,37 +351,107 @@
                               Trace Class Methods
                             </label>
                              <input type="text" class="form-control" id="class_trace" placeholder="java.net.Socket,java.io.File,java.lang.String">
+                       </div>
+                    
+                        <hr/>
+                        <div class="form-group">
+                          <h4> Instrumentation </h4>
                         </div>
-     
+
+                        <div class="box-footer">
+                          <button id="frida_spawn" type="submit" class="btn btn-success btn-sm"><i class="far fa-play-circle"></i> Spawn & Inject</button>
+                          <button id="frida_session" type="submit" class="btn btn-success btn-sm" disabled><i class="fas fa-redo"></i> Inject </button>
+                          {% if device_mode != "gadget" %}
+                          <button id="frida_attach" type="submit" class="btn btn-success btn-sm"><i class="fas fa-bug"></i> Attach </button>
+                          {% endif %}
+                          <button id="frida_get" class="btn btn-primary btn-sm" hidden><i class="fas fa-code"></i> Injected Code</button>
+                       </div>
+                      </div>  <!--Frida options, hidden for xposed -->
 
 
+                        <hr/>
+                        <div class="form-group">
+                          <h4> User Interface </h4>
+                        </div>
+
+                        {% if activities or exported_activities %}
+                        <label class="box-title" for="activities">Activities</label>
+                        <div class="form-group form-inline" id="start_activity_form">
+                          <select style="width: 15rem" class="form-select form-control form-group mb-2 mr-3" name="activities" id="activities">
+                            <optgroup label="Exported Activities">
+                              {% for activity in exported_activities %}
+                            <option value="{{ activity }}">{{ activity }}</option>
+                                      {% endfor %}
+                            </optgroup>
+                            <optgroup label="Activities">
+                                        {% for activity in activities %}
+                              <option value="{{ activity }}">{{ activity }}</option>
+                                        {% endfor %}
+                            </optgroup>
+                          </select>
+                          <button id="start_activity" type="submit" class="btn btn-primary btn-sm form-group mb-2">♢ Start Activity</button>
+                        </div>
+                        {% endif %}
+            
+                        {% if deeplinks %}
+                        <div class="mt-3">
+                          <label class="box-title" for="deeplinks">Deep Links</label>
+                          <div class="form-group form-inline">
+                            <select class="form-select form-control form-group mb-2 mr-2" name="schemes" id="schemes">
+                            {% for activity, intent in deeplinks.items %}
+                              <optgroup label="{{ activity }} - Schemes">
+                                {% for scheme in intent.schemes %}
+                                  <option value="{{ scheme }}">{{ scheme }}</option>
+                                {% endfor %}
+                              </optgroup>
+                            {% endfor %}
+                            </select>
+                            <select class="form-select form-control form-group mb-2 mr-2" name="hosts" id="hosts">
+                              {% for activity, intent in deeplinks.items %}
+                                <optgroup label="{{ activity }} - Hosts">
+                                  {% for host in intent.hosts %}
+                                    <option value="{{ host }}">{{ host }}</option>
+                                  {% endfor %}
+                                  <option value=""></option>
+                                </optgroup>
+                              {% endfor %}
+                            </select>
+                            <select class="form-select form-control form-group mb-2 mr-2" name="paths" id="paths">
+                              {% for activity, intent in deeplinks.items %}
+                                <optgroup label="{{ activity }} - Paths/PathPrefixes">
+                                  {% for path in intent.paths %}
+                                    <option value="{{ path }}">{{ path }}</option>
+                                  {% endfor %}
+                                  {% for path_prefix in intent.path_prefixs %}
+                                    <option value="{{ path_prefix }}">{{ path_prefix }}</option>
+                                  {% endfor %}
+                                  <option value=""></option>
+                                </optgroup>
+                              {% endfor %}
+                            </select>
+                            <input type="text" class="form-control form-group mb-2 mr-2" id="query" placeholder="/foo?bar=">
+                            <button id="start_deeplink" type="submit" class="btn btn-primary btn-sm form-group mb-2">▶ Deeplink</button>
+                          </div>
+                        </div>
+                        {% endif %}
+                        
                       </div>
                       <!-- /.box-body -->
-
-                      <div class="box-footer">
                      
-                      <button id="frida_spawn" type="submit" class="btn btn-success"><i class="fas fa-play"></i> Start Instrumentation</button>
-                      <button id="fd_log" type="button" class="btn btn-primary" disabled><i class="fas fa-file-medical-alt"></i> Frida Live Logs</button>
-                      </div>
                     </form>
                   </div>
            
-          <!--tab end-->
+                 
+
+               
+
+                  
+              <!--tab end-->
 
                   </div>
 
-                  <div class="tab-pane fade" id="frida_logs" role="tabpanel" aria-labelledby="frida-tab">
-                    <h4 class="page-header"><strong>Frida Logs </strong>- {{ package }}</h4>
-                    <div id="messages"></br>Data refreshed in every 3 seconds.</div>
-                    <pre class="frida-pre" id="logs"></pre>
-                  </div>
-                  <!-- frida logs -->
                   <div class="tab-pane fade" id="errors" role="tabpanel" aria-labelledby="errors-tab">
-                    
-                    
                     <iframe sandbox frameborder="0" width="100%" height="650px" id="er"></iframe>
-                    
-                    
                   </div>
                 </div>
               </div>
@@ -256,7 +466,7 @@
           </div>
           <!-- /.col -->
 
-           <div class="col-md-4" id="codeedit">
+           <div class="col-md-5" id="codeedit">
             <div class="card card-default">
               <div class="card-header">
                 <h3 class="card-title"><i class="fa fa-code"></i> Frida Code Editor </h3>
@@ -264,27 +474,22 @@
               </div>
               <!-- /.card-header -->
               <div class="card-body">
-              <div class="row">
-                  <div class="col-12">
+                <div id="code-editor">
 <textarea id="code-js" rows="100">
-Java.perform(function() {
-  // Use send() for logging
-});
+  Java.perform(function() {
+    // Use send() for logging
+  });
 </textarea>
-                  </div>
-                  <div class="col-12">
-                    <br/>
-                    <div class="form-group">
-                      <span class="box-title">Available Scripts (Use CTRL to choose multiple)  </span>
-                      <button id="loadscript" type="submit" class="btn btn-primary btn-sm">Load</button>
-                    </div>
-                    <div class="form-group">
-                         <select id="fd_scs" multiple="" class="form-control">
-                          </select>
-                    </div>
-                  </div>
                 </div>
-                <!-- end row-->
+                <br/>
+                <div class="form-group">
+                  <span class="box-title">Available Scripts (Use CTRL to choose multiple)  </span>
+                  <button id="loadscript" type="submit" class="btn btn-primary btn-sm">Load</button>
+                </div>
+                <div class="form-group">
+                  <select id="fd_scs" size="10" multiple="" class="form-control">
+                  </select>
+                </div>
               
               </div>
               <!-- /.card-body -->
@@ -311,6 +516,24 @@ Java.perform(function() {
             <!-- /.card -->
           </div>
           <!-- /.col -->
+
+
+          <div class="col-md-12">
+            <div class="card card-default">
+              <!-- /.card-header -->
+              <div class="card-body">
+                   <div>
+                    <h4 class="page-header"><strong>Frida Logs </strong></h4>
+                    <div id="messages"></br>Data refreshed in every 3 seconds.</div>
+                    <pre class="frida-pre" id="frida-logs" style="font-size:15pt"></pre>
+                  </div>
+              </div>
+              <!-- /.card-body -->
+            </div>
+            <!-- /.card -->
+          </div>
+          <!-- /.col -->
+
         
         </div>
 
@@ -319,6 +542,54 @@ Java.perform(function() {
      </div>
     </div>
 </div>
+
+<!--Loader-->
+<div class="hidden loading">
+  <div class='uil-ring-css' style='transform:scale(0.79);'>
+    <div></div>
+  </div>
+  </div>
+<!-- Modal -->
+<div class="modal fade" id="frida_attach_mdl" tabindex="-1" role="dialog" aria-labelledby="exampleModalLabel" aria-hidden="true">
+  <div class="modal-dialog" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="exampleModalLabel">Attach to a Running Process</h5>
+        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form role="form">
+          <div class="form-group">
+            <select id="process_select" class="form-select" aria-label="Select a process">
+            </select>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button id="attach_to_pid" type="button" class="btn btn-primary"><i class="fas fa-bug"></i> Attach</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+ <!-- Modal -->
+ <div class="modal fade" id="get_code_modal" tabindex="-1" role="dialog">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h4 class="modal-title">Injected Frida Script</h4>
+        <button type="button" class="close" data-dismiss="modal">&times;</button>
+      </div>
+      <div class="modal-body" id="injected_content">
+      </div>
+    </div>
+  </div>
+</div>
+
+
 <!-- Modal -->
 <div class="modal" id="tls_modal" tabindex="-1" role="dialog">
   <div class="modal-dialog modal-xl">
@@ -387,12 +658,6 @@ Java.perform(function() {
       </div>
     </div>
 
-    <!--Loader-->
-<div class="hidden loading">
-  <div class='uil-ring-css' style='transform:scale(0.79);'>
-    <div></div>
-  </div>
-  </div>
 
 
     <!-- /.modal-content -->
@@ -408,6 +673,7 @@ Java.perform(function() {
 <script src="{% static "codemirror/jshint.js" %}"></script>
 <script src="{% static "codemirror/lint.js" %}"></script>
 <script src="{% static "codemirror/javascript-lint.js" %}"></script>
+<script src="{% static "enlighterjs/enlighterjs.min.js" %}"></script>
 <script>
 // Loading Spinner
 function dynamic_loader(){
@@ -418,6 +684,12 @@ function stop_loader(){
     var loadingOverlay = document.querySelector('.loading');
     loadingOverlay.classList.add('hidden');
 }
+
+// Prevent screen image drag
+document.getElementById('my').ondragstart = function() { return false; };
+
+// Hide Frida Logs on page load
+document.getElementById('frida-logs').style.display = 'none';
 
 // Frida Auxiliary actions
 
@@ -442,6 +714,7 @@ function aux_click(cb) {
 function action(url, data, on_success){
   //Add CSRF
   data.csrfmiddlewaretoken ='{{ csrf_token }}';
+  data.identifier = '{{ device_identifier|escapejs }}';
   $.ajax({
     url : url, 
     type : "POST",
@@ -454,14 +727,32 @@ function action(url, data, on_success){
   });
 }
 
+// Escape
+function escape(data_string) {
+    var encodedStr = data_string.replace(/[\u00A0-\u9999<>\&]/gim, function (i) {
+        return '&#' + i.charCodeAt(0) + ';';
+    });
+    return encodedStr;
+}
+
+// Escape HTML
+function escapeHtml(unsafe){
+    return unsafe
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
 // Frida load other scripts
 function load_frida_others(){
-  $.get(document.location.origin + '/list_frida_scripts/', function(json, status){
-      if (json.status == 'ok'){
+  action('{% url 'list_frida_scripts' %}', {device: 'android'}, function(json) {
+    if (json.status==="ok"){
         json.files.forEach(function(script) {
-          $('#fd_scs').append('<option value=' + escape(script) + '>' + escape(script) + '</option>');
+          $('<option>').val(script).text(script).appendTo('#fd_scs');
         });
-      }
+    }
   });
 }
 
@@ -471,13 +762,15 @@ var editor = CodeMirror.fromTextArea(document.getElementById("code-js"), {
     mode: "javascript",
     gutters: ["CodeMirror-lint-markers"],
     lint: true,
-    lineWrapping: true,
-    onLoad: restore(),
+    lineWrapping: true
   });
+
+// Restore saved content
+restore();
 
 //Restore Code
 function restore(){
-  var custom_code = window.sessionStorage.getItem("code");
+  var custom_code = window.sessionStorage.getItem("code_android");
   if (custom_code !== null) {
     setTimeout(function(){ editor.getDoc().setValue(custom_code); }, 2000);
   }
@@ -550,17 +843,13 @@ var Terminal = Terminal || function (cmdLineContainer, outputContainer) {
 
             if (e.keyCode == 38 || e.keyCode == 40) {
                 this.value = history_[histpos_] ? history_[histpos_] : histtemp_;
-                this.value = this.value; // Sets cursor to end of input.
+                setTimeout(() => {
+                    this.setSelectionRange(this.value.length, this.value.length);
+                }, 0); // Sets cursor to end of input.
             }
         }
     }
 
-    function escape(data) {
-        var encodedStr = data.replace(/[\u00A0-\u9999<>\&]/gim, function (i) {
-            return '&#' + i.charCodeAt(0) + ';';
-        });
-        return encodedStr;
-    }
 
     function output(html, escape_=false, pre=false, error=false) {
         if (escape_)
@@ -573,15 +862,43 @@ var Terminal = Terminal || function (cmdLineContainer, outputContainer) {
          output_.insertAdjacentHTML('beforeEnd', '<p>' + html + '</p>');
     }
 
-    // Cross-browser impl to get document's height.
-    function getDocHeight_() {
-        var d = document;
-        return Math.max(
-            Math.max(d.body.scrollHeight, d.documentElement.scrollHeight),
-            Math.max(d.body.offsetHeight, d.documentElement.offsetHeight),
-            Math.max(d.body.clientHeight, d.documentElement.clientHeight)
-        );
+    function scrollToShellBottom(){
+      // Scroll to shell bottom and ensure shell is completely visible
+      var myElement = document.getElementById('shell');
+      
+      // Scroll the shell content to the bottom
+      myElement.scrollTop = myElement.scrollHeight;
+      
+      // Ensure the shell element is visible in the viewport
+      myElement.scrollIntoView({ 
+        block: 'end', 
+        behavior: 'smooth',
+        inline: 'nearest'
+      });
+      
+      // For dynamic content, we need to continuously monitor and scroll
+      // Set up a MutationObserver to watch for content changes
+      if (!window.shellObserver) {
+        window.shellObserver = new MutationObserver(function(mutations) {
+          // When content changes, scroll to keep shell visible
+          myElement.scrollTop = myElement.scrollHeight;
+          myElement.scrollIntoView({ 
+            block: 'end', 
+            behavior: 'smooth',
+            inline: 'nearest'
+          });
+        });
+        
+        // Start observing the shell for content changes
+        window.shellObserver.observe(myElement, {
+          childList: true,
+          subtree: true,
+          characterData: true
+        });
+      }
     }
+
+
     function get_comp(comp){
       action(document.location.origin + '/get_component/', { component: comp, hash: '{{ hash }}'}, function(json) {
           if (json.status==="ok")
@@ -666,11 +983,10 @@ var Terminal = Terminal || function (cmdLineContainer, outputContainer) {
                     else if (exec_cmd.length > 0)
                         execute_adb(exec_cmd)
             };
-            window.scrollTo(0, getDocHeight_());
+            scrollToShellBottom();
             this.value = ''; // Clear/setup line for next input.
         }
     }
-
     return {
         init: function () {
             output(intro);
@@ -685,6 +1001,35 @@ $(document).ready(function() {
 $('.prompt').html('[root@android] # ');
 var term = new Terminal('#input-line .cmdline', '#shell output');
 term.init();
+
+
+//Start Specific Activity
+$("#start_activity").click(function(){
+  let activity = $('#activities option:selected').val();
+  print_status("Starting Activity: " + activity)
+  start_activity(activity)
+  return false;
+});
+
+// Start deeplink
+$("#start_deeplink").click(function(){
+  let scheme = $('#schemes option:selected').val();
+  let host = $('#hosts option:selected').val();
+  let path = $('#paths option:selected').val();
+  let query = $('#query').val();
+
+  if (scheme === undefined && host === undefined){
+    print_status("Please select a valid scheme and host.")
+    return false;
+  }
+  if (path === undefined)
+    path = '';
+  let url = scheme + host + path + query;
+  print_status("Triggering Deeplink: " + url);
+  start_deeplink(url)
+  return false;
+});
+
 
 // Start up
 {% if android_version < 5 %}
@@ -721,15 +1066,19 @@ print_status("Invoking MobSF agents.");
 print_status("Environment is ready for Dynamic Analysis.");
 print_status("Start Instrumentation or Run the application and navigate through the different flows or business logic manually.");
 
-// Frida Logs Tab
+// Frida Logs
 
 function get_logs(){
       $.ajax({
-        url : '/frida_logs/?hash={{ hash }}&stream=1', 
+        url : '{% url 'frida_logs' %}?hash={{ hash }}&stream=1', 
         type : "GET",
         dataType: "json", 
         success : function(json){ 
-            $('#logs').text(json.data);
+          if (json.status==="ok"){
+            $('#frida-logs').text(json.message);
+          } else {
+            $('#frida-logs').text('')
+          }
         },
         error : function(xhr, ajaxOptions, thrownError) {
           console.log(xhr.responseText);
@@ -741,61 +1090,247 @@ setInterval( function () {
       get_logs();
 }, 3000 );
 
-// Touch Events
-var touch = "off";
+// View Screen
+var screen_width, screen_height;
+var screenfunc;
+const screenImage = document.getElementById('my');
+const screenContainer = document.getElementById('container');
 
-$('#my').click(function(e) {
-  if (touch === "on")
-  {
-    var res=[$('#screen_width').val(),$('#screen_height').val()];
-    var width = res[0];
-    var height =res[1];
-    if (width.length > 0 && height.length > 0)
-    {
-        width = parseInt(width);
-        height = parseInt(height);
-        var offset = $(this).offset();
-        var x = e.pageX - offset.left;
-        var y = e.pageY - offset.top;
-        x = x * (width/320); 
-        y = y * (height/580);
-        console.log('X Axis: '+ x + " Y Axis: "+ y);
-        action(document.location.origin + '/touch_events/', {x: x, y: y}, function(json) {
-            if (json.status==='ok')
-              console.log('Clicked!');
-            else
-              console.log(json.message)
-          });
-      }
+function resizeDevicePreview() {
+  if (!screen_width || !screen_height) {
+    return;
+  }
+  const styles = window.getComputedStyle(screenContainer);
+  const horizontalPadding = (
+    parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight)
+  );
+  const parentWidth = screenContainer.parentElement.clientWidth;
+  const maximumWidth = screen_width > screen_height ? 760 : 420;
+  const widthForViewportHeight = (
+    window.innerHeight * 0.72 * screen_width / screen_height
+    + horizontalPadding
+  );
+  const frameWidth = Math.min(
+    maximumWidth,
+    Math.max(120, parentWidth - 24),
+    widthForViewportHeight
+  );
+  screenContainer.style.width = Math.floor(frameWidth) + 'px';
+}
+
+screenImage.addEventListener('load', function() {
+  if (touch === "on" && this.naturalWidth && this.naturalHeight) {
+    screen_width = this.naturalWidth;
+    screen_height = this.naturalHeight;
+    screenContainer.classList.toggle(
+      'landscape',
+      screen_width > screen_height
+    );
+    resizeDevicePreview();
+    console.log(
+      'Screen Resolution: ' + screen_width + 'x' + screen_height
+    );
   }
 });
-
-// View Screen
-var screenfunc;
+window.addEventListener('resize', resizeDevicePreview);
 $("#screen").click(function() {
       var stext = $("#screen").text();
       if (stext.includes("Show Screen")){
           $("#screen").html("<i class='fa fa-mobile'></i> Stop Screen");
           print_status('Screen streaming started.')
           touch = "on";
+          $('.device-nav-button').prop('disabled', false);
           screenfunc = setInterval(function(){
               // Capture Screen
-              action(document.location.origin + '/screen_cast/', {}, function(json) {
-                if (json.status == 'ok')
-                  $('#my').attr('src', document.location.origin + '/download/screen/screen.png?'+ new Date().getTime());
-                else
+              action('{% url 'screen_cast' %}', {}, function(json) {
+                if (json.status == 'ok'){
+                  $('#my').attr('src', json.message);
+                } else
                   console.log(json.message)
                });
-          },3000);
+          }, 2000);
       } else {
           $("#screen").html("<i class='fa fa-mobile-alt'></i> Show Screen");
           print_status("Screen streaming stopped.");
           $('#my').attr('src', '/static/img/loading.jpg');
           clearInterval(screenfunc);
           touch = "off";
+          $('.device-nav-button').prop('disabled', true);
       }
       return false;  
 }); 
+
+
+// Touch Events
+var touch = "off";
+function android_input(event, x, y, endX = 0, endY = 0){
+  if ( touch === "on"){
+    action('{% url 'android_touch' %}', {
+      event,
+      x,
+      y,
+      end_x: endX,
+      end_y: endY,
+      max_x: screen_width,
+      max_y: screen_height
+    }, function(json) {
+        if (json.status==='ok')
+          console.log('Event: ' + event);
+        else
+          console.log(json.message)
+    });
+  }
+}
+
+$('.device-nav-button').on('click', function(e) {
+  e.preventDefault();
+  android_input($(this).data('android-key'), 0, 0);
+  $('#container').trigger('focus');
+});
+
+function getXY(e, t){
+      const rect = t.getBoundingClientRect();
+      if (!screen_width || !screen_height
+          || rect.width <= 0 || rect.height <= 0) {
+        return null;
+      }
+      const renderedX = Math.max(
+        0, Math.min(e.clientX - rect.left, rect.width)
+      );
+      const renderedY = Math.max(
+        0, Math.min(e.clientY - rect.top, rect.height)
+      );
+      const x = Math.min(
+        screen_width - 1,
+        Math.round(renderedX * screen_width / rect.width)
+      );
+      const y = Math.min(
+        screen_height - 1,
+        Math.round(renderedY * screen_height / rect.height)
+      );
+      console.log('X Axis: '+ x + " Y Axis: "+ y);
+      return {x, y};
+}
+
+// Touch Screen Tap and Swipe Events
+var pointerStart = null;
+$("#my").on("pointerdown", function(e) {
+  const point = e.originalEvent || e;
+  const coordinates = getXY(point, this);
+  if (!coordinates || touch !== "on") {
+    return;
+  }
+  pointerStart = {
+    x: coordinates.x,
+    y: coordinates.y,
+    time: performance.now(),
+    id: point.pointerId
+  };
+  if (this.setPointerCapture && point.pointerId !== undefined) {
+    this.setPointerCapture(point.pointerId);
+  }
+  e.preventDefault();
+});
+
+$("#my").on("pointerup", function(e) {
+  const point = e.originalEvent || e;
+  const coordinates = getXY(point, this);
+  if (!pointerStart || !coordinates || touch !== "on") {
+    pointerStart = null;
+    return;
+  }
+  const elapsed = performance.now() - pointerStart.time;
+  const distance = Math.hypot(
+    coordinates.x - pointerStart.x,
+    coordinates.y - pointerStart.y
+  );
+  const tapThreshold = Math.max(
+    24,
+    Math.min(screen_width, screen_height) * 0.03
+  );
+  if (distance <= tapThreshold && elapsed < 500) {
+    android_input('touch', coordinates.x, coordinates.y);
+  } else if (distance > tapThreshold) {
+    android_input(
+      'swipe',
+      pointerStart.x,
+      pointerStart.y,
+      coordinates.x,
+      coordinates.y
+    );
+  }
+  pointerStart = null;
+  e.preventDefault();
+});
+
+$("#my").on("pointercancel", function() {
+  pointerStart = null;
+});
+
+
+// Touch Text Input
+$('#android_text_btn').click(function(e) {
+  if ($('#android_text').val()){
+    // Send the text to device
+    android_input('text', $('#android_text').val(), 0);
+    $('#android_text').val('');
+  } else {
+    // send the enter event
+    android_input('enter', 0, 0);
+  }
+});
+
+// Keyboard Events
+$('#container').on('keypress', function(event) {
+    // Detect printable characters
+    if (touch === "on"){
+        switch(event.keyCode){
+          case 13:
+            // Enter
+            // Send text to VM
+            $('#android_text_btn').click();
+            break;
+          case 32:
+            // Space
+            // Prevent space propagation to page scroll
+            $('#android_text').val($('#android_text').val() + ' ');
+            event.preventDefault();
+            break;
+          default:
+          $('#android_text').val($('#android_text').val() + String.fromCharCode(event.keyCode));
+        }
+    }
+ });
+ $('#container').on('keydown', function(event) {
+    // Detect Backspace etc.
+    if (touch === "on")
+    {
+        switch(event.keyCode){
+          case 8:
+            // Backspace
+            android_input('backspace', 0, 0)
+            break;
+          case 37:
+            // Left
+            android_input('left', 0, 0)
+            break;
+          case 39:
+            // Left
+            android_input('right', 0, 0)
+            break;
+        }
+    }
+ });
+ // Send text on enter from text box
+ $('#android_text').keypress(function(event){
+  if (touch === "on"){
+    var keycode = (event.keyCode ? event.keyCode : event.which);
+    if(keycode === 13){
+      $('#android_text_btn').click();
+    }
+	event.stopPropagation();
+  }
+});
 
 //Screenshot
 $("#ss").click(function() {
@@ -856,8 +1391,26 @@ $("#proxy").click(function() {
         print_status(json.message);
     });
     return false;  
-}); 
- 
+});
+
+function start_activity(activity){
+  action('{% url "start_activity" %}', {hash: '{{ hash }}', 'activity': activity}, function(json) {
+    if (json.status === "ok")
+        print_status("Activity Started");
+    else
+      print_status(json.message);
+  });
+}
+
+function start_deeplink(url){
+  action('{% url "start_deeplink" %}', {hash: '{{ hash }}', 'url': url}, function(json) {
+    if (json.status === "ok")
+      print_status("Deeplink Triggered");
+    else
+      print_status(json.message);
+  });
+}
+
 function activity_tester(test){
   action(document.location.origin + '/activity_tester/', {hash: '{{ hash }}', 'test': test}, function(json) {
     if (json.status === "ok")
@@ -943,23 +1496,23 @@ $("#run_app").click(function() {
 // Logcat Stream
 $("#logstream").click(function() {
     print_status("Logcat Steaming started.");
-    setTimeout(function(){ window.open(document.location.origin + '/logcat/?package={{ package }}', '_blank');}, 500);   
+    setTimeout(function(){
+      window.open(
+        document.location.origin
+        + '/logcat/?package={{ package|urlencode }}'
+        + '&identifier='
+        + encodeURIComponent('{{ device_identifier|escapejs }}'),
+        '_blank'
+      );
+    }, 500);
     return false;  
 }); 
-// Frida logs
-$("#fd_log").click(function() {
-    $('#tabnav a[href="#frida_logs"]').tab('show');
-    // print_status("Streaming Frida logs");
-    // setTimeout(function(){ window.open(document.location.origin + '/frida_logs/?hash={{ hash }}&package={{ package }}', '_blank');}, 100);   
-    document.body.scrollTop = document.documentElement.scrollTop = 0;
-    return false;  
-});
 
 
 // Load Frida Scripts
 $("#loadscript").click(function() {
    var scripts = $('#fd_scs').val();
-   action(document.location.origin + '/get_script/', {scripts: scripts}, function(json) {
+   action('{% url 'get_script' %}', {scripts: scripts, device: 'android'}, function(json) {
     if (json.status==="ok"){
         editor.getDoc().setValue(json.content);
     }
@@ -967,16 +1520,17 @@ $("#loadscript").click(function() {
   return false;  
 });
 
-
-// Frida Spawn
-$("#frida_spawn").click(function() {
-    print_status("Instrumenting the application with Frida.");
+// Frida Spawn, Session and Ps
+function frida_instrument(frida_action, pid=null, new_pkg=null){
     // Save Frida Code to Session Storage
     var code = editor.getDoc().getValue();
-    window.sessionStorage.setItem('code', code);
-    $('#fd_log').removeAttr('disabled');
-    $('#frida-tab').removeClass('disabled');
-    var default_hooks = [];
+    window.sessionStorage.setItem('code_android', code);
+    // Show Frida logs
+    document.getElementById('frida-logs').style.display = 'block';
+    // Show Frida inject button
+    document.getElementById('frida_get').hidden = false;
+     var default_hooks = [];
+
     $.each($("input[name='default_hooks']:checked"), function(){            
         default_hooks.push($(this).val());
     });
@@ -984,13 +1538,26 @@ $("#frida_spawn").click(function() {
       $('#apimon').show();
     else
       $('#apimon').hide();
-
     var auxiliary_hooks = [];
     $.each($("input[name='auxiliary']:checked"), function(){            
         auxiliary_hooks.push($(this).val());
     });
 
-    action(document.location.origin + '/frida_instrument/', {
+    if (frida_action === 'spawn'){
+      print_status("Instrumenting the application with Frida.");
+    } else if (frida_action === 'session' && pid === null){
+      print_status("Injecting Frida script to existing session.");
+    } else if (pid){
+      print_status("Attaching to PID: " + parseInt(pid));
+    } else if (frida_action == 'ps'){
+      print_status("Enumerating running processes.");
+    } else if (frida_action == 'get'){
+      print_status("Getting injected frida script.");
+    }
+    action('{% url 'android_instrument' %}', {
+      frida_action,
+      pid, // attach pid
+      new_package: new_pkg, // attach package
       hash: '{{ hash }}',
       default_hooks: default_hooks.join(","),
       auxiliary_hooks: auxiliary_hooks.join(","),
@@ -999,21 +1566,76 @@ $("#frida_spawn").click(function() {
       class_trace:  $('#class_trace').val(),
       frida_code: editor.getDoc().getValue(),
     }, function(json) {
-    if (json.status === "ok")
-      print_status("Frida instrumentation successful.");
-    else
-      print_status(json.message);
+      if (json.status !== "ok")
+        print_status(json.message);
+      else if (frida_action === 'spawn')
+        document.getElementById('frida_session').disabled = false;
+      // Attach to a running process
+      if (frida_action == 'ps' && json.message && json.message.length > 0 && Array.isArray(json.message)){
+        $("#process_select").empty();
+        json.message.forEach(function(p) {
+          $('<option>').val(p.pid.toString() + ',' + p.identifier.toString()).text(p.pid.toString() + ': ' + p.name.toString() + ' - ' + p.identifier.toString()).appendTo('#process_select');
+        });
+        $('#frida_attach_mdl').modal('toggle');
+      } else if (frida_action =='get'){
+        var injected = document.getElementById("injected_content");
+        injected.innerHTML = '<pre id="injected-pre"></pre>';
+        document.getElementById("injected-pre").textContent = json.message;
+        EnlighterJS.enlight( document.getElementById('injected-pre'), {
+          theme: mobsfEnlighterTheme(),
+          linehover: false,
+          textOverflow: 'scroll',
+          language: 'javascript',
+        });
+        $('#get_code_modal').modal('toggle');
+      }
   });
+}
+
+// Frida Spawn
+$("#frida_spawn").click(function() {
+  frida_instrument('spawn');
   return false;  
 }); 
+
+// Frida Session
+$("#frida_session").click(function() {
+  var default_hooks = "input[name='default_hooks']";
+  if ($(default_hooks + ":checked").length == $(default_hooks).length)
+      // If all default hooks are selected, uncheck all during injection
+      $(default_hooks + ':checkbox').prop("checked", false );
+  frida_instrument('session');
+  return false;  
+}); 
+
+
+// Frida Get Processes to attach
+$("#frida_attach").click(function() {
+  frida_instrument('ps');
+  return false;  
+}); 
+
+// Frida Attach to Pid
+$("#attach_to_pid").click(function() {
+  var values = $('#process_select').val();
+  var pid = values.split(',')[0];
+  var package = values.split(',')[1];
+  frida_instrument('session', pid, package);
+  $('#frida_attach_mdl').modal('hide');
+  return false;  
+}); 
+
+// Frida Get Injected Script
+$("#frida_get").click(function() {
+  frida_instrument('get');
+  return false;  
+});
 
 //Frida Get Runtime Dependencies
 $("#deps").click(function() {
     print_status("Getting application runtime dependencies.");
     action(document.location.origin + '/get_dependencies/', {hash: '{{ hash }}'}, function(json) {
       if (json.status==="ok"){
-          $('#fd_log').removeAttr('disabled');
-          $('#frida-tab').removeClass('disabled');
           print_status("Dependencies collected!");
       } else {
           print_status(json.message);
@@ -1026,12 +1648,17 @@ $("#deps").click(function() {
 function dump(){
   action(document.location.origin + '/download_data/', { hash: '{{ hash }}'}, function(json) {
     if (json.status==="ok"){
-      print_status("Application data dumped!");
+      if (json.data_collected === false)
+        print_status(json.message);
+      else
+        print_status("Application data dumped!");
       print_status("Generating Report...Please Wait!");
       //Call reporting
       window.location = document.location.origin+"/dynamic_report/{{ hash }}";
     } else {
-      print_status(json.message);
+      print_status("Application data was not collected: " + json.message);
+      print_status("Generating partial report...Please Wait!");
+      window.location = document.location.origin+"/dynamic_report/{{ hash }}";
     }
   });
 }

@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 
 from django.conf import settings
 
@@ -6,17 +6,13 @@ from mobsf.MobSF.utils import strict_package_check
 
 
 def get_content(file_name):
-    content = ''
-    script = os.path.join(settings.TOOLS_DIR,
-                          'frida_scripts',
-                          'auxiliary',
-                          file_name)
+    tools_dir = Path(settings.TOOLS_DIR)
+    aux_dir = tools_dir / 'frida_scripts' / 'android' / 'auxiliary'
+    script = aux_dir / file_name
 
-    with open(script, 'r',
-              encoding='utf8',
-              errors='ignore') as scp:
-        content = scp.read()
-    return content
+    if script.exists():
+        return script.read_text('utf-8', 'ignore')
+    return ''
 
 
 def get_loaded_classes():
@@ -45,7 +41,7 @@ def get_methods(klazz):
 def class_pattern(pattern):
     """Search in loaded classes based on pattern."""
     pattern = pattern.replace(
-        '/', '\\/').replace(';', '')
+        '/', '\\/').replace(';', '').replace('\n', '').replace('\r', '')
     content = get_content('search_class_pattern.js')
     return content.replace('{{PATTERN}}', pattern)
 

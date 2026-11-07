@@ -1,42 +1,111 @@
 """Common Utils."""
 import ast
+import base64
 import hashlib
 import io
+import json
 import logging
 import ntpath
 import os
 import platform
+import random
 import re
+import sys
 import shutil
 import signal
 import string
 import subprocess
 import stat
 import sqlite3
+import time
 import unicodedata
 import threading
-from distutils.version import StrictVersion
+from pathlib import Path
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as ThreadPoolTimeoutError,
+)
 
-import distro
+from packaging.version import Version
 
 import psutil
 
 import requests
 
 from django.shortcuts import render
+from django.utils import timezone
+
+from mobsf.MobSF.env import flag_from_value
+from mobsf.MobSF. init import api_key
 
 from . import settings
 
+
 logger = logging.getLogger(__name__)
 ADB_PATH = None
+ANDROID_DEVICE_SNAPSHOT = None
+BASE64_REGEX = re.compile(r'^[-A-Za-z0-9+/]*={0,3}$')
+MD5_REGEX = re.compile(r'^[0-9a-f]{32}$')
+SCAN_STATE_FILES = (
+    'proxy-state',
+    'gadget-mode',
+    'frida-owner',
+    'split-apks.json',
+)
+# Regex to capture strings between quotes or <string> tag
+STRINGS_REGEX = re.compile(r'(?<=\")(.+?)(?=\")|(?<=\<string>)(.+?)(?=\<)')
+# MobSF Custom regex to catch maximum URI like strings
+URL_REGEX = re.compile(
+    (
+        r'((?:https?://|s?ftps?://|'
+        r'file://|javascript:|data:|www\d{0,3}[.])'
+        r'[\w().=/;,#:@?&~*+!$%\'{}-]+)'
+    ),
+    re.UNICODE | re.IGNORECASE)
+EMAIL_REGEX = re.compile(r'[\w+.-]{1,20}@[\w-]{1,20}\.[\w]{2,10}')
+USERNAME_REGEX = re.compile(r'^\w[\w\-\@\.]{1,35}$')
+GOOGLE_API_KEY_REGEX = re.compile(r'AIza[0-9A-Za-z-_]{35}$')
+GOOGLE_APP_ID_REGEX = re.compile(r'\d{1,2}:\d{1,50}:android:[a-f0-9]{1,50}')
+PKG_REGEX = re.compile(
+    r'package\s+([a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*);')
+IOS_DEVICE_ID_REGEX = re.compile(r'^[a-fA-F0-9-]{20,40}$')
+SSH_DEVICE_ID_REGEX = re.compile(
+    r'^(?:\[(?P<ipv6>[^\]]+)\]|(?P<host>[^:\[\]]+)):(?P<port>\d{1,5})$')
 
 
 class Color(object):
     GREEN = '\033[92m'
-    ORANGE = '\033[33m'
+    GREY = '\033[0;37m'
     RED = '\033[91m'
     BOLD = '\033[1m'
     END = '\033[0m'
+
+
+class ColorLogsWrapper(logging.Formatter):
+    """ANSI colored log formatter."""
+
+    COLOR_MAP = {
+        'cyan': '\033[36m',
+        'green': '\033[32m',
+        'yellow': '\033[33m',
+        'red': '\033[31m',
+        'red,bg_white': '\033[31;47m',
+    }
+    RESET = '\033[0m'
+
+    def __init__(self, fmt=None, datefmt=None, style='%', log_colors=None):
+        super().__init__(fmt=fmt, datefmt=datefmt, style=style)
+        self.log_colors = log_colors or {}
+        if platform.system() == 'Windows':
+            os.system('')
+
+    def format(self, record):  # noqa: A003
+        color_name = self.log_colors.get(record.levelname, '')
+        record.log_color = self.COLOR_MAP.get(color_name, '')
+        message = super().format(record)
+        if record.log_color:
+            return f'{message}{self.RESET}'
+        return message
 
 
 def upstream_proxy(flaw_type):
@@ -46,7 +115,7 @@ def upstream_proxy(flaw_type):
             proxy_port = str(settings.UPSTREAM_PROXY_PORT)
             proxy_host = '{}://{}:{}'.format(
                 settings.UPSTREAM_PROXY_TYPE,
-                settings.UPSTREAM_PROXY_IP,
+                docker_translate_proxy_ip(settings.UPSTREAM_PROXY_IP),
                 proxy_port)
             proxies = {flaw_type: proxy_host}
         else:
@@ -55,45 +124,61 @@ def upstream_proxy(flaw_type):
                 settings.UPSTREAM_PROXY_TYPE,
                 settings.UPSTREAM_PROXY_USERNAME,
                 settings.UPSTREAM_PROXY_PASSWORD,
-                settings.UPSTREAM_PROXY_IP,
+                docker_translate_proxy_ip(settings.UPSTREAM_PROXY_IP),
                 proxy_port)
             proxies = {flaw_type: proxy_host}
     else:
         proxies = {flaw_type: None}
-    verify = bool(settings.UPSTREAM_PROXY_SSL_VERIFY)
+    verify = settings.UPSTREAM_PROXY_SSL_VERIFY
     return proxies, verify
 
 
-def api_key():
-    """Print REST API Key."""
-    if os.environ.get('MOBSF_API_KEY'):
-        logger.info('\nAPI Key read from environment variable')
-        return os.environ['MOBSF_API_KEY']
-
-    secret_file = os.path.join(settings.MobSF_HOME, 'secret')
-    if is_file_exists(secret_file):
-        try:
-            _api_key = open(secret_file).read().strip()
-            return gen_sha256_hash(_api_key)
-        except Exception:
-            logger.exception('Cannot Read API Key')
+def get_system_resources():
+    """Get CPU and Memory Available."""
+    # Get number of physical cores
+    physical_cores = psutil.cpu_count(logical=False)
+    # Get number of logical processors (threads)
+    logical_processors = psutil.cpu_count(logical=True)
+    # Get total RAM
+    total_ram = psutil.virtual_memory().total / (1024 ** 3)  # Convert bytes to GB
+    return physical_cores, logical_processors, total_ram
 
 
 def print_version():
     """Print MobSF Version."""
     logger.info(settings.BANNER)
     ver = settings.MOBSF_VER
+    logger.info('Author: Ajin Abraham | opensecurity.in')
+    mobsf_api_key = api_key(settings.MOBSF_HOME)
     if platform.system() == 'Windows':
         logger.info('Mobile Security Framework %s', ver)
-        print('REST API Key: ' + api_key())
+        print(f'REST API Key: {mobsf_api_key}')
+        print('Default Credentials: mobsf/mobsf')
     else:
-        logger.info('\033[1m\033[34mMobile Security Framework %s\033[0m', ver)
-        print('REST API Key: ' + Color.BOLD + api_key() + Color.END)
-    logger.info('OS: %s', platform.system())
-    logger.info('Platform: %s', platform.platform())
-    dist = distro.linux_distribution(full_distribution_name=False)
-    if dist:
-        logger.info('Dist: %s', ' '.join(dist))
+        logger.info(
+            '%sMobile Security Framework %s%s', Color.GREY, ver, Color.END)
+        print(f'REST API Key: {Color.BOLD}{mobsf_api_key}{Color.END}')
+        print(f'Default Credentials: {Color.BOLD}mobsf/mobsf{Color.END}')
+    os = platform.system()
+    pltfm = platform.platform()
+    dist = ''
+    if hasattr(platform, 'freedesktop_os_release'):
+        try:
+            os_rel = platform.freedesktop_os_release()
+            dist = ' '.join(filter(None, (
+                os_rel.get('ID', ''),
+                os_rel.get('VERSION_ID', ''),
+                os_rel.get('VERSION_CODENAME', ''),
+            ))).strip()
+        except OSError:
+            pass
+    dst_str = f' ({dist}) ' if dist else ' '
+    env_str = f'OS Environment: {os}{dst_str}{pltfm}'
+    logger.info(env_str)
+    python_version = sys.version.split(' ')[0]
+    logger.info('Python Version: %s', python_version)
+    cores, threads, ram = get_system_resources()
+    logger.info('CPU Cores: %s, Threads: %s, RAM: %.2f GB', cores, threads, ram)
     find_java_binary()
     check_basic_env()
     thread = threading.Thread(target=check_update, name='check_update')
@@ -111,18 +196,13 @@ def check_update():
             proxies, verify = upstream_proxy('https')
         except Exception:
             logger.exception('Setting upstream proxy')
-        response = requests.get(github_url, timeout=5,
-                                proxies=proxies, verify=verify)
-        html = str(response.text).split('\n')
         local_version = settings.VERSION
-        remote_version = None
-        for line in html:
-            if line.startswith('VERSION'):
-                remote_version = line.split('\'')[1]
-                break
+        response = requests.head(github_url, timeout=5,
+                                 proxies=proxies, verify=verify)
+        remote_version = response.next.path_url.split('v')[1]
         if remote_version:
-            sem_loc = StrictVersion(local_version)
-            sem_rem = StrictVersion(remote_version)
+            sem_loc = Version(local_version)
+            sem_rem = Version(remote_version)
             if sem_loc < sem_rem:
                 logger.warning('A new version of MobSF is available, '
                                'Please update to %s from master branch.',
@@ -161,20 +241,30 @@ def find_java_binary():
     return 'java'
 
 
-def run_process(args):
-    try:
-        proc = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        dat = ''
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            dat += str(line)
-        return dat
-    except Exception:
-        logger.error('Finding Java path - Cannot Run Process')
-        return ''
+def find_aapt(tool_name):
+    """Find the specified tool (aapt or aapt2)."""
+    # Check system PATH for the tool
+    tool_path = shutil.which(tool_name)
+    if tool_path:
+        return tool_path
+
+    # Check common Android SDK locations
+    home_dir = Path.home()  # Get the user's home directory
+    sdk_paths = [
+        home_dir / 'Library' / 'Android' / 'sdk',  # macOS
+        home_dir / 'Android' / 'Sdk',              # Linux
+        home_dir / 'AppData' / 'Local' / 'Android' / 'Sdk',  # Windows
+    ]
+
+    for sdk_path in sdk_paths:
+        build_tools_path = sdk_path / 'build-tools'
+        if build_tools_path.exists():
+            for version in sorted(build_tools_path.iterdir(), reverse=True):
+                tool_path = version / tool_name
+                if tool_path.exists():
+                    return str(tool_path)
+
+    return None
 
 
 def print_n_send_error_response(request,
@@ -203,6 +293,8 @@ def filename_from_path(path):
 
 
 def get_md5(data):
+    if isinstance(data, str):
+        data = data.encode('utf-8')
     return hashlib.md5(data).hexdigest()
 
 
@@ -216,6 +308,10 @@ def find_between(s, first, last):
 
 
 def is_number(s):
+    if not s:
+        return False
+    if s == 'NaN':
+        return False
     try:
         float(s)
         return True
@@ -246,7 +342,7 @@ def python_dict(value):
 
 
 def is_base64(b_str):
-    return re.match('^[A-Za-z0-9+/]+[=]{0,2}$', b_str)
+    return BASE64_REGEX.match(b_str)
 
 
 def is_internet_available():
@@ -294,7 +390,9 @@ def sha256_object(file_obj):
 
 def gen_sha256_hash(msg):
     """Generate SHA 256 Hash of the message."""
-    hash_object = hashlib.sha256(msg.encode('utf-8'))
+    if isinstance(msg, str):
+        msg = msg.encode('utf-8')
+    hash_object = hashlib.sha256(msg)
     return hash_object.hexdigest()
 
 
@@ -320,27 +418,188 @@ def find_process_by(name):
     """Return a set of process path matching name."""
     proc = set()
     for p in psutil.process_iter(attrs=['name']):
-        if (name == p.info['name']):
-            proc.add(p.exe())
+        try:
+            if name == p.info['name']:
+                proc.add(p.exe())
+        except (psutil.AccessDenied,
+                psutil.NoSuchProcess,
+                psutil.ZombieProcess):
+            continue
     return proc
 
 
-def get_device():
+def docker_translate_localhost(identifier):
+    """Convert localhost to host.docker.internal."""
+    if not identifier:
+        return identifier
+    if not os.getenv('MOBSF_PLATFORM') == 'docker':
+        return identifier
+    try:
+        identifier = identifier.strip()
+        docker_internal = 'host.docker.internal:'
+        if re.match(r'^emulator-\d{4}$', identifier):
+            adb_port = int(identifier.split('emulator-')[1]) + 1
+            # ADB port is console port + 1
+            return f'{docker_internal}{adb_port}'
+        m = re.match(r'^(localhost|127\.0\.0\.1):\d{1,5}$', identifier)
+        if m:
+            adb_port = int(identifier.split(m.group(1))[1].replace(':', ''))
+            return f'{docker_internal}{adb_port}'
+        return identifier
+    except Exception:
+        logger.exception('Failed to convert device '
+                         'identifier for docker connectivity')
+        return identifier
+
+
+def docker_translate_proxy_ip(ip):
+    """Convert localhost proxy ip to host.docker.internal."""
+    if not os.getenv('MOBSF_PLATFORM') == 'docker':
+        return ip
+    if ip and ip.strip() in ('127.0.0.1', 'localhost'):
+        return 'host.docker.internal'
+    return ip
+
+
+def valid_android_device_identifier(identifier):
+    """Validate an ADB device serial or network identifier."""
+    if not isinstance(identifier, str):
+        return False
+    identifier = identifier.strip()
+    if not identifier or len(identifier) > 255:
+        return False
+    serial = r'[A-Za-z0-9][A-Za-z0-9._:%-]*'
+    bracketed_ipv6 = r'\[[0-9A-Fa-f:.%]+\](?::\d{1,5})?'
+    return bool(re.fullmatch(
+        f'(?:{serial}|{bracketed_ipv6})',
+        identifier,
+    ))
+
+
+def get_android_devices():
+    """Return devices reported by the configured ADB server."""
+    devices = []
+    try:
+        output = subprocess.check_output(
+            [get_adb(), 'devices', '-l'],
+            stderr=subprocess.STDOUT,
+            timeout=10,
+        ).decode('utf-8', 'ignore')
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.startswith('List of devices'):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            identifier, state = parts[:2]
+            if 'no permissions' in line:
+                state = 'no permissions'
+            if not valid_android_device_identifier(identifier):
+                logger.warning('Ignoring invalid ADB device identifier')
+                continue
+            details = {}
+            for item in parts[2:]:
+                if ':' in item:
+                    key, value = item.split(':', 1)
+                    details[key] = value
+            devices.append({
+                'identifier': identifier,
+                'state': state,
+                'details': details,
+            })
+    except Exception:
+        logger.exception('Failed to list Android devices')
+        return devices
+    snapshot = tuple(
+        (device['identifier'], device['state'])
+        for device in devices
+    )
+    global ANDROID_DEVICE_SNAPSHOT
+    if snapshot != ANDROID_DEVICE_SNAPSHOT:
+        online = sum(
+            device['state'] == 'device'
+            for device in devices
+        )
+        logger.info(
+            'Found %d Android device%s (%d online)',
+            len(devices),
+            '' if len(devices) == 1 else 's',
+            online,
+        )
+        ANDROID_DEVICE_SNAPSHOT = snapshot
+    return devices
+
+
+def get_device(request=None):
     """Get Device."""
+    if request is not None:
+        identifier = request.POST.get('identifier')
+        explicit_selection = bool(identifier)
+        session_selection = False
+        if not identifier:
+            identifier = request.GET.get('identifier')
+            explicit_selection = bool(identifier)
+        if not identifier:
+            identifier = request.session.get('android_device_identifier')
+            session_selection = bool(identifier)
+        if identifier and valid_android_device_identifier(identifier):
+            identifier = identifier.strip()
+            attempts = 3 if session_selection else 1
+            for attempt in range(attempts):
+                connected = {
+                    device['identifier']
+                    for device in get_android_devices()
+                    if device['state'] == 'device'
+                }
+                if identifier in connected:
+                    return identifier
+                translated = docker_translate_localhost(identifier)
+                if translated in connected:
+                    return translated
+                if attempt + 1 < attempts:
+                    time.sleep(0.25)
+            if explicit_selection:
+                logger.warning(
+                    'Requested Android device is not connected')
+            else:
+                logger.info(
+                    'Selected Android device is temporarily unavailable')
+            return None
+        if identifier:
+            if session_selection:
+                request.session.pop(
+                    'android_device_identifier', None)
+            logger.warning('Invalid Android device selection')
+            return None
     if os.getenv('ANALYZER_IDENTIFIER'):
-        return os.getenv('ANALYZER_IDENTIFIER')
-    if settings.ANALYZER_IDENTIFIER:
-        return settings.ANALYZER_IDENTIFIER
+        identifier = os.getenv('ANALYZER_IDENTIFIER')
+    elif settings.ANALYZER_IDENTIFIER:
+        identifier = settings.ANALYZER_IDENTIFIER
     else:
-        dev_id = ''
-        out = subprocess.check_output([get_adb(), 'devices']).splitlines()
-        if len(out) > 2:
-            dev_id = out[1].decode('utf-8').split('\t')[0]
-            return dev_id
-    logger.error('Is the Android VM running?\n'
-                 'MobSF cannot identify device id.\n'
-                 'Please set ''ANALYZER_IDENTIFIER in '
-                 '%s', get_config_loc())
+        online = [
+            device for device in get_android_devices()
+            if device['state'] == 'device'
+        ]
+        if len(online) == 1:
+            return online[0]['identifier']
+        if len(online) > 1:
+            if request is not None:
+                logger.info(
+                    'Multiple Android devices are online; '
+                    'waiting for device selection')
+            else:
+                logger.warning(
+                    'Multiple Android devices are connected. '
+                    'An explicit device identifier is required.')
+            return None
+        identifier = None
+    if identifier and valid_android_device_identifier(identifier):
+        return docker_translate_localhost(identifier.strip())
+    if identifier:
+        logger.error('Invalid Android device identifier')
+    logger.error(get_android_dm_exception_msg())
+    return None
 
 
 def get_adb():
@@ -357,6 +616,11 @@ def get_adb():
             ADB_PATH = settings.ADB_BINARY
             return ADB_PATH
         if ADB_PATH:
+            return ADB_PATH
+        adb_name = 'adb.exe' if platform.system() == 'Windows' else 'adb'
+        adb_on_path = shutil.which(adb_name)
+        if adb_on_path:
+            ADB_PATH = adb_on_path
             return ADB_PATH
         if platform.system() == 'Windows':
             adb_loc = find_process_by('adb.exe')
@@ -379,21 +643,15 @@ def get_adb():
             os.environ['MOBSF_ADB'] = 'adb'
             logger.warning('Dynamic Analysis related '
                            'functions will not work. '
-                           '\nMake sure a Genymotion Android VM/'
-                           'Android Studio Emulator'
-                           ' is running before performing'
-                           ' Dynamic Analysis.')
+                           '\nMake sure ADB is installed and an authorized '
+                           'Android runtime or device is connected before '
+                           'performing Dynamic Analysis.')
     return 'adb'
 
 
 def check_basic_env():
     """Check if we have basic env for MobSF to run."""
     logger.info('MobSF Basic Environment Check')
-    try:
-        import http_tools  # noqa F401
-    except ImportError:
-        logger.exception('httptools not installed!')
-        os.kill(os.getpid(), signal.SIGTERM)
     try:
         import lxml  # noqa F401
     except ImportError:
@@ -412,10 +670,24 @@ def check_basic_env():
                     'Java/jdk1.7.0_17/bin/"'
                     '\nJAVA_DIRECTORY = "/usr/bin/"')
         os.kill(os.getpid(), signal.SIGTERM)
-    get_adb()
 
 
-def update_local_db(db_name, url, local_file):
+def is_db_update_due(local_file):
+    """Allow a local DB update check at most once per interval."""
+    marker = Path(f'{local_file}.lastcheck')
+    try:
+        if Path(local_file).exists() and marker.exists():
+            age = time.time() - marker.stat().st_mtime
+            if 0 <= age < settings.DB_UPDATE_INTERVAL:
+                return False
+        # Claim the check before running it so concurrent scans skip it
+        marker.touch()
+    except OSError:
+        logger.warning('Failed to read or write %s', marker)
+    return True
+
+
+def update_local_db(db_name, url, local_file, timeout=60):
     """Update Local DBs."""
     update = None
     inmemoryfile = None
@@ -425,7 +697,7 @@ def update_local_db(db_name, url, local_file):
         logger.exception('[ERROR] Setting upstream proxy')
     try:
         response = requests.get(url,
-                                timeout=3,
+                                timeout=timeout,
                                 proxies=proxies,
                                 verify=verify)
         resp = response.content
@@ -441,6 +713,9 @@ def update_local_db(db_name, url, local_file):
         else:
             logger.info('%s Database is up-to-date', db_name)
         return update
+    except (requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectionError):
+        logger.warning('Failed to download %s DB.', db_name)
     except Exception:
         logger.exception('[ERROR] %s DB Update', db_name)
         return update
@@ -454,31 +729,28 @@ def read_sqlite(sqlite_file):
     logger.info('Reading SQLite db')
     table_dict = {}
     try:
-        con = sqlite3.connect(sqlite_file)
+        con = sqlite3.connect(f'file:{sqlite_file}?mode=ro', uri=True)
         cur = con.cursor()
         cur.execute('SELECT name FROM sqlite_master WHERE type=\'table\';')
         tables = cur.fetchall()
         for table in tables:
-            table_dict[table[0]] = {'head': [], 'data': []}
-            cur.execute('PRAGMA table_info(\'%s\')' % table)
+            table_name = table[0]
+            safe_name = table_name.replace('"', '""')
+            table_dict[table_name] = {'head': [], 'data': []}
+            cur.execute(f'PRAGMA table_info("{safe_name}")')
             rows = cur.fetchall()
             for sq_row in rows:
-                table_dict[table[0]]['head'].append(sq_row[1])
-            cur.execute('SELECT * FROM \'%s\'' % table)
+                table_dict[table_name]['head'].append(sq_row[1])
+            cur.execute(f'SELECT * FROM "{safe_name}"')
             rows = cur.fetchall()
             for sq_row in rows:
                 tmp_row = []
                 for each_row in sq_row:
                     tmp_row.append(str(each_row))
-                table_dict[table[0]]['data'].append(tmp_row)
+                table_dict[table_name]['data'].append(tmp_row)
     except Exception:
         logger.exception('Reading SQLite db')
     return table_dict
-
-
-def is_pipe_or_link(path):
-    """Check for named pipe."""
-    return os.path.islink(path) or stat.S_ISFIFO(os.stat(path).st_mode)
 
 
 def get_network():
@@ -515,13 +787,6 @@ def get_proxy_ip(identifier):
     return proxy_ip
 
 
-def is_safe_path(safe_root, check_path):
-    """Detect Path Traversal."""
-    safe_root = os.path.realpath(os.path.normpath(safe_root))
-    check_path = os.path.realpath(os.path.normpath(check_path))
-    return os.path.commonprefix([check_path, safe_root]) == safe_root
-
-
 def file_size(app_path):
     """Return the size of the file."""
     return round(float(os.path.getsize(app_path)) / (1024 * 1024), 2)
@@ -529,10 +794,83 @@ def file_size(app_path):
 
 def is_md5(user_input):
     """Check if string is valid MD5."""
-    stat = re.match(r'^[0-9a-f]{32}$', user_input)
+    stat = MD5_REGEX.match(user_input)
     if not stat:
         logger.error('Invalid scan hash')
     return stat
+
+
+def scan_state_root():
+    """Return the root of host-side scan state, outside upload dirs."""
+    return Path(settings.MOBSF_HOME) / 'scan_state'
+
+
+def scan_state_dir(checksum):
+    """Return the host-side state directory of a scan."""
+    if not isinstance(checksum, str) or not is_md5(checksum):
+        raise ValueError('Invalid scan hash')
+    return scan_state_root() / checksum
+
+
+def scan_state_file(checksum, name):
+    """Return a host-side state file path of a scan."""
+    if name not in SCAN_STATE_FILES:
+        raise ValueError('Invalid scan state name')
+    return scan_state_dir(checksum) / name
+
+
+def read_analysis_state(checksum):
+    """Read the Android dynamic analysis state of a scan."""
+    state_file = scan_state_file(checksum, 'proxy-state')
+    if not state_file.is_file() or state_file.is_symlink():
+        return {}
+    try:
+        state = json.loads(state_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        logger.warning('Ignoring invalid Android analysis state')
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def write_analysis_state(checksum, state):
+    """Atomically write the Android dynamic analysis state of a scan."""
+    state_file = scan_state_file(checksum, 'proxy-state')
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = state_file.with_name(f'.{state_file.name}.tmp')
+    tmp_file.write_text(json.dumps(state), encoding='utf-8')
+    os.replace(tmp_file, state_file)
+
+
+def get_gadget_analysis(checksum):
+    """Return the device identifier of a Frida Gadget analysis."""
+    marker = scan_state_file(checksum, 'gadget-mode')
+    if not marker.is_file() or marker.is_symlink():
+        return None
+    try:
+        return marker.read_text(encoding='utf-8', errors='ignore').strip()
+    except OSError:
+        return None
+
+
+def is_gadget_analysis(checksum):
+    """Check if a scan is running in Frida Gadget mode."""
+    return get_gadget_analysis(checksum) is not None
+
+
+def set_gadget_analysis(checksum, identifier=None):
+    """Mark or unmark a scan as running in Frida Gadget mode."""
+    marker = scan_state_file(checksum, 'gadget-mode')
+    if not identifier:
+        marker.unlink(missing_ok=True)
+        return
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(identifier, encoding='utf-8')
+
+
+def clear_analysis_state(checksum):
+    """Remove the Android dynamic analysis state of a scan."""
+    for name in ('proxy-state', 'gadget-mode'):
+        scan_state_file(checksum, name).unlink(missing_ok=True)
 
 
 def get_config_loc():
@@ -547,48 +885,48 @@ def get_config_loc():
         return 'MobSF/settings.py'
 
 
-def clean_filename(filename, replace=' '):
-    if platform.system() == 'Windows':
-        whitelist = f'-_.() {string.ascii_letters}{string.digits}'
-        # replace spaces
-        for r in replace:
-            filename = filename.replace(r, '_')
-        # keep only valid ascii chars
-        cleaned_filename = unicodedata.normalize(
-            'NFKD', filename).encode('ASCII', 'ignore').decode()
-        # keep only whitelisted chars
-        return ''.join(c for c in cleaned_filename if c in whitelist)
-    return filename
-
-
-def cmd_injection_check(data):
-    """OS Cmd Injection from Commix."""
-    breakers = [
-        ';', '%3B', '&', '%26', '&&',
-        '%26%26', '|', '%7C', '||',
-        '%7C%7C', '%0a', '%0d%0a',
-    ]
-    return any(i in data for i in breakers)
-
-
 def strict_package_check(user_input):
-    """Strict package name check."""
-    pat = re.compile(r'^\w+\.*[\w\.\$]+$')
+    """Strict package name check.
+
+    For android package and ios bundle id
+    """
+    pat = re.compile(r'^([a-zA-Z]{1}[\w.-]{1,255})$')
     resp = re.match(pat, user_input)
-    if not resp:
-        logger.error('Invalid package/class name')
+    if not resp or '..' in user_input:
+        logger.error('Invalid package name/bundle id/class name')
     return resp
 
 
-def is_path_traversal(user_input):
-    """Check for path traversal."""
-    if (('../' in user_input)
-        or ('%2e%2e' in user_input)
-        or ('..' in user_input)
-            or ('%252e' in user_input)):
-        logger.error('Path traversal attack detected')
-        return True
-    return False
+def strict_ios_class(user_input):
+    """Strict check to see if input is valid iOS class."""
+    pat = re.compile(r'^([\w\.]+)$')
+    resp = re.match(pat, user_input)
+    if not resp:
+        logger.error('Invalid class name')
+    return resp
+
+
+def is_instance_id(user_input):
+    """Check if string is valid instance id."""
+    reg = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    stat = re.match(reg, user_input)
+    if not stat:
+        logger.error('Invalid instance identifier')
+    return stat
+
+
+def common_check(instance_id):
+    """Common checks for instance APIs."""
+    if not getattr(settings, 'CORELLIUM_API_KEY', ''):
+        return {
+            'status': 'failed',
+            'message': 'Missing Corellium API key'}
+    elif not is_instance_id(instance_id):
+        return {
+            'status': 'failed',
+            'message': 'Invalid instance identifier'}
+    else:
+        return None
 
 
 def is_zip_magic(file_obj):
@@ -596,3 +934,284 @@ def is_zip_magic(file_obj):
     file_obj.seek(0, 0)
     # ZIP magic PK.. no support for spanned and empty arch
     return bool(magic == b'\x50\x4B\x03\x04')
+
+
+def is_elf_so_magic(file_obj):
+    magic = file_obj.read(4)
+    file_obj.seek(0, 0)
+    # ELF/SO Magic
+    return bool(magic == b'\x7F\x45\x4C\x46')
+
+
+def is_dex_magic(file_obj):
+    magic = file_obj.read(8)
+    file_obj.seek(0, 0)
+    # DEX Magic: "dex\n" + 3-digit version + "\x00"
+    return bool(
+        len(magic) == 8
+        and magic[:4] == b'dex\n'
+        and magic[4:7].isdigit()
+        and magic[7:8] == b'\x00',
+    )
+
+
+def is_dylib_magic(file_obj):
+    magic = file_obj.read(4)
+    file_obj.seek(0, 0)
+    # DYLIB Magic
+    magics = (
+        b'\xCA\xFE\xBA\xBE',  # 32 bit
+        b'\xFE\xED\xFA\xCE',  # 32 bit
+        b'\xCE\xFA\xED\xFE',  # 32 bit
+        b'\xFE\xED\xFA\xCF',  # 64 bit
+        b'\xCF\xFA\xED\xFE',  # 64 bit
+        b'\xCA\xFE\xBA\xBF',  # 64 bit
+    )
+    return bool(magic in magics)
+
+
+def is_a_magic(file_obj):
+    magic = file_obj.read(4)
+    file_obj.seek(0, 0)
+    magics = (
+        b'\x21\x3C\x61\x72',
+        b'\xCA\xFE\xBA\xBF',  # 64 bit
+        b'\xCA\xFE\xBA\xBE',  # 32 bit
+    )
+    return bool(magic in magics)
+
+
+def disable_print():
+    sys.stdout = open(os.devnull, 'w')
+
+
+# Restore
+def enable_print():
+    sys.stdout = sys.__stdout__
+
+
+def find_key_in_dict(key, var):
+    """Recursively look up a key in a nested dict."""
+    if hasattr(var, 'items'):
+        for k, v in var.items():
+            if k == key:
+                yield v
+            if isinstance(v, dict):
+                for result in find_key_in_dict(key, v):
+                    yield result
+            elif isinstance(v, list):
+                for d in v:
+                    for result in find_key_in_dict(key, d):
+                        yield result
+
+
+def key(data, key_name):
+    """Return the data for a key_name."""
+    return data.get(key_name)
+
+
+def replace(value, arg):
+    """
+    Replacing filter.
+
+    Use `{{ "aaa"|replace:"a|b" }}`
+    """
+    if len(arg.split('|')) != 2:
+        return value
+
+    what, to = arg.split('|')
+    return value.replace(what, to)
+
+
+def pathify(value):
+    """Convert to path."""
+    return value.replace('.', '/')
+
+
+def relative_path(value):
+    """Show relative path to two parents."""
+    sep = None
+    if '/' in value:
+        sep = '/'
+    elif '\\\\' in value:
+        sep = '\\\\'
+    elif '\\' in value:
+        sep = '\\'
+    if not sep or value.count(sep) < 2:
+        return value
+    path = Path(value)
+    return path.relative_to(path.parent.parent).as_posix()
+
+
+def pretty_json(value):
+    """Pretty print JSON."""
+    try:
+        return json.dumps(json.loads(value), indent=4)
+    except Exception:
+        return value
+
+
+def base64_decode(value):
+    """Try Base64 decode."""
+    commonb64s = ('eyJ0')
+    decoded = None
+    try:
+        if is_base64(value) or value.startswith(commonb64s):
+            decoded = base64.b64decode(
+                value).decode('ISO-8859-1')
+    except Exception:
+        pass
+    if decoded:
+        return f'{value}\n\nBase64 Decoded: {decoded}'
+    return value
+
+
+def base64_encode(value):
+    """Base64 encode."""
+    if isinstance(value, str):
+        value = value.encode('utf-8')
+    return base64.b64encode(value)
+
+
+def android_component(data):
+    """Return Android component from data."""
+    cmp = ''
+    if 'Activity-Alias' in data:
+        cmp = 'activity_alias_'
+    elif 'Activity' in data:
+        cmp = 'activity_'
+    elif 'Service' in data:
+        cmp = 'service_'
+    elif 'Content Provider' in data:
+        cmp = 'provider_'
+    elif 'Broadcast Receiver' in data:
+        cmp = 'receiver_'
+    return cmp
+
+
+def get_android_dm_exception_msg():
+    return (
+        'MobSF cannot find an authorized Android runtime or device.'
+        ' Please read official documentation.'
+        ' If this error persists, set ANALYZER_IDENTIFIER in '
+        f'{get_config_loc()} or via environment variable'
+        ' MOBSF_ANALYZER_IDENTIFIER')
+
+
+def get_android_src_dir(app_dir, typ):
+    """Get Android source code location."""
+    src = None
+    if typ in ('apk', 'jar', 'aar', 'dex'):
+        src = app_dir / 'java_source'
+    elif typ in {'studio', 'flutter'}:
+        src = app_dir / 'app' / 'src' / 'main' / 'java'
+        kt = app_dir / 'app' / 'src' / 'main' / 'kotlin'
+        if not src.exists() and kt.exists():
+            src = kt
+    elif typ == 'eclipse':
+        src = app_dir / 'src'
+    return src
+
+
+def settings_enabled(attr):
+    """Return True when a boolean setting is exactly enabled."""
+    try:
+        return flag_from_value(getattr(settings, attr))
+    except Exception:
+        return False
+
+
+def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
+    """Generate random string."""
+    return ''.join(random.choice(chars) for _ in range(size))
+
+
+def append_scan_status(checksum, status, exception=None):
+    """Append Scan Status to Database."""
+    from mobsf.StaticAnalyzer.models import RecentScansDB
+    try:
+        db_obj = RecentScansDB.objects.only('SCAN_LOGS').get(MD5=checksum)
+        if status == 'init':
+            db_obj.SCAN_LOGS = []
+            db_obj.save(update_fields=['SCAN_LOGS'])
+            return
+        current_logs = python_dict(db_obj.SCAN_LOGS)
+        current_logs.append({
+            'timestamp': timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'status': status,
+            'exception': exception})
+        db_obj.SCAN_LOGS = current_logs
+        db_obj.save(update_fields=['SCAN_LOGS'])
+    except RecentScansDB.DoesNotExist:
+        # Expected to fail for iOS Dynamic Analysis Report Generation
+        # Calls MalwareScan and TrackerScan with different checksum
+        pass
+    except Exception:
+        logger.exception('Appending Scan Status to Database')
+
+
+def get_scan_logs(checksum):
+    """Get the scan logs for the given checksum."""
+    from mobsf.StaticAnalyzer.models import RecentScansDB
+    try:
+        logs = RecentScansDB.objects.filter(
+            MD5=checksum).values_list('SCAN_LOGS', flat=True).first()
+        if logs is not None:
+            return python_list(logs)
+    except Exception:
+        msg = 'Fetching scan logs from the DB failed.'
+        logger.exception(msg)
+    return []
+
+
+class TaskTimeoutError(Exception):
+    pass
+
+
+def run_with_timeout(func, limit, *args, **kwargs):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=limit)
+        except ThreadPoolTimeoutError:
+            msg = f'function <{func.__name__}> timed out after {limit} seconds'
+            raise TaskTimeoutError(msg)
+
+
+def set_permissions(path):
+    # Lazy import: security.py imports this module.
+    from mobsf.MobSF.security import is_pipe_or_link
+    base_path = Path(path)
+    if is_pipe_or_link(base_path):
+        return
+    # Owner search bit so the scan can walk the tree. Files stay
+    # non-executable. Group and other are not granted write or execute.
+    perm_dir = (stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+                | stat.S_IRGRP | stat.S_IROTH)
+    perm_file = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+
+    # Set permissions for directories and files. Skip links so chmod
+    # cannot follow a symlink out of the extract directory.
+    for item in base_path.rglob('*'):
+        try:
+            if is_pipe_or_link(item):
+                continue
+            if item.is_dir():
+                item.chmod(perm_dir)
+            elif item.is_file():
+                item.chmod(perm_file)
+        except Exception:
+            pass
+
+
+def parse_host_port(text):
+    # Match [IPv6]:port OR host:port
+    ipv6_match = re.match(r'^\[(.+)\]:(\d+)$', text)
+    if ipv6_match:
+        return ipv6_match.group(1), int(ipv6_match.group(2))
+
+    ipv4_match = re.match(r'^([^:]+):(\d+)$', text)
+    if ipv4_match:
+        return ipv4_match.group(1), int(ipv4_match.group(2))
+
+    raise ValueError('Input must be in format host:port or [IPv6]:port')

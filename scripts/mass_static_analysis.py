@@ -28,7 +28,16 @@ def start_scan(directory, server_url, apikey, rescan='0'):
     uploaded = []
     mimes = {
         '.apk': 'application/octet-stream',
+        '.xapk': 'application/octet-stream',
+        '.apks': 'application/octet-stream',
+        '.aab': 'application/octet-stream',
+        '.jar': 'application/java-archive',
+        '.aar': 'application/octet-stream',
+        '.dex': 'application/octet-stream',
+        '.so': 'application/octet-stream',
         '.ipa': 'application/octet-stream',
+        '.dylib': 'application/octet-stream',
+        '.a': 'application/octet-stream',
         '.appx': 'application/octet-stream',
         '.zip': 'application/zip',
     }
@@ -73,7 +82,7 @@ if __name__ == '__main__':
                                'of a running MobSF Server. '
                                '(ex: 127.0.0.1:8000)')
     parser.add_argument(
-        '-k', '--apikey', help='MobSF REST API Key')
+        '-k', '--apikey', help='MobSF API Key')
     parser.add_argument(
         '-r', '--rescan', help='Run a fresh scan. '
                                'Value can be 1 or 0 (Default: 0)')
@@ -86,7 +95,7 @@ if __name__ == '__main__':
         apikey = args.apikey
         rescan = args.rescan
         if not is_server_up(server_url):
-            print('MobSF REST API Server is not running at ' + server_url)
+            print('MobSF API Server is not running at ' + server_url)
             print('Exiting!')
             exit(0)
         # MobSF is running, start scan

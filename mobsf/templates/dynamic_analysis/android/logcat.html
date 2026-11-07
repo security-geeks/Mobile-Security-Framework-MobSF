@@ -1,26 +1,75 @@
-<div id="messages"></div>
-<button id="tgl" onclick="toggle()">Stop Streaming</button>
+<div id="messages" style="padding-bottom: 48px;"></div>
+<button id="tgl" onclick="toggle()" style="position: fixed; bottom: 12px; left: 12px; z-index: 1000;">Stop Streaming</button>
 <script type="text/javascript">
-var source = new EventSource('/logcat/?app_package={{package}}');
 var i = 0;
 var stream = true;
 var div = document.getElementById("messages");
-source.onmessage = function(message) {
+var controller = new AbortController();
+
+function renderMessage(data) {
     if (stream) {
-        // Grep package name
-        if (!message.data.includes('{{package}}'))
-            return;
         i = i + 1;
         // Display only last 500 lines
-        if (i < 500){
-            div.innerHTML = div.innerHTML + html_safe(message.data) + "<br>" ;
-        } else {
-            div.innerHTML = html_safe(message.data) + "<br>";
-            i=0;
+        if (i >= 500){
+            div.replaceChildren();
+            i = 0;
         }
+        var line = document.createElement('div');
+        line.textContent = data;
+        div.appendChild(line);
         window.scrollTo(0,document.body.scrollHeight);
     }
-};
+}
+
+async function startStream() {
+    const body = new URLSearchParams();
+    body.append('app_package', '{{ package|escapejs }}');
+    body.append('identifier', '{{ identifier|escapejs }}');
+    try {
+        const response = await fetch('/logcat/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            body: body,
+            signal: controller.signal
+        });
+        if (!response.ok || !response.body) {
+            div.textContent = 'Unable to start logcat stream.';
+            return;
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+            const result = await reader.read();
+            if (result.done)
+                break;
+            buffer += decoder.decode(result.value, {stream: true});
+            const messages = buffer.split('\n\n');
+            buffer = messages.pop();
+            messages.forEach(function(message) {
+                if (message.startsWith('data:'))
+                    renderMessage(message.substring(5));
+            });
+            await new Promise(function(resolve) {
+                setTimeout(resolve, 0);
+            });
+        }
+        buffer += decoder.decode();
+        if (buffer.startsWith('data:'))
+            renderMessage(buffer.substring(5));
+    } catch (error) {
+        if (error.name !== 'AbortError')
+            div.textContent = 'Logcat stream ended unexpectedly.';
+    }
+}
+
+window.addEventListener('beforeunload', function() {
+    controller.abort();
+});
+startStream();
 
 function toggle(){
     var btn =  document.getElementById("tgl");
@@ -33,24 +82,4 @@ function toggle(){
         btn.textContent = "Stop Streaming";
     }
 }
-
-function html_safe(data){
-      data = data.replace('b\'', '').
-                  replace(/\\r\\n\'/g, '').
-                  replace('b"', '').
-                  replace(/\\r\\n"/g, '')
-      return data
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#x27;")
-          .replace(/`/g, "&#x60;")
-          .replace(/\(/g, "&#x28;")
-          .replace(/\)/g, "&#x29;")
-          .replace(/{/g, "&#x7B;")
-          .replace(/}/g, "&#x7D;")
-          .replace(/-/g, "&#x2D;")
-          .replace(/\+/g, "&#x2B;");
-}
-
 </script>

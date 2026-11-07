@@ -1,12 +1,10 @@
 # -*- coding: utf_8 -*-
 """Frida tests."""
 import base64
-import glob
 import os
 import re
 import json
 from pathlib import Path
-import threading
 import logging
 
 from django.shortcuts import render
@@ -14,40 +12,48 @@ from django.conf import settings
 from django.views.decorators.http import require_http_methods
 
 from mobsf.DynamicAnalyzer.views.android.frida_core import Frida
-from mobsf.DynamicAnalyzer.views.android.operations import (
-    get_package_name,
+from mobsf.DynamicAnalyzer.views.common.shared import (
     invalid_params,
-    is_attack_pattern,
     send_response,
 )
+from mobsf.MobSF.security import is_attack_pattern
+from mobsf.DynamicAnalyzer.views.android.operations import (
+    get_package_name,
+)
 from mobsf.MobSF.utils import (
+    get_device,
     is_file_exists,
+    is_gadget_analysis,
     is_md5,
-    is_safe_path,
     print_n_send_error_response,
+    read_analysis_state,
+    strict_package_check,
+    valid_android_device_identifier,
+)
+from mobsf.MobSF.views.authentication import (
+    login_required,
+)
+from mobsf.MobSF.views.authorization import (
+    Permissions,
+    permission_required,
 )
 
 logger = logging.getLogger(__name__)
 
+
+def _analysis_identifier(request, checksum):
+    """Return the device bound to this dynamic-analysis session."""
+    identifier = read_analysis_state(checksum).get('identifier')
+    if valid_android_device_identifier(identifier):
+        return identifier
+    return get_device(request)
+
+
 # AJAX
 
 
-@require_http_methods(['GET'])
-def list_frida_scripts(request, api=False):
-    """Get frida scripts from others."""
-    scripts = []
-    others = os.path.join(settings.TOOLS_DIR,
-                          'frida_scripts',
-                          'others')
-    files = glob.glob(others + '**/*.js', recursive=True)
-    for item in files:
-        scripts.append(Path(item).stem)
-    return send_response({'status': 'ok',
-                          'files': scripts},
-                         api)
-# AJAX
-
-
+@login_required
+@permission_required(Permissions.SCAN)
 @require_http_methods(['POST'])
 def get_runtime_dependencies(request, api=False):
     """Get App runtime dependencies."""
@@ -58,10 +64,16 @@ def get_runtime_dependencies(request, api=False):
         checksum = request.POST['hash']
         if not is_md5(checksum):
             return invalid_params(api)
-        package = get_package_name(checksum)
+        identifier = _analysis_identifier(request, checksum)
+        package = get_package_name(checksum, identifier)
         if not package:
             return invalid_params(api)
-        get_dependencies(package, checksum)
+        success, error = get_dependencies(package, checksum, identifier)
+        if not success:
+            return send_response({
+                'status': 'failed',
+                'message': error or 'Unable to connect to Frida',
+            }, api)
         return send_response(
             {'status': 'ok'},
             api)
@@ -71,38 +83,18 @@ def get_runtime_dependencies(request, api=False):
 # AJAX
 
 
-@require_http_methods(['POST'])
-def get_script(request, api=False):
-    """Get frida scripts from others."""
-    data = {'status': 'ok', 'content': ''}
-    try:
-        scripts = request.POST.getlist('scripts[]')
-        others = os.path.join(settings.TOOLS_DIR,
-                              'frida_scripts',
-                              'others')
-        script_ct = []
-        for script in scripts:
-            script_file = os.path.join(others, script + '.js')
-            if not is_safe_path(others, script_file):
-                data = {
-                    'status': 'failed',
-                    'message': 'Path traversal detected.'}
-                return send_response(data, api)
-            if is_file_exists(script_file):
-                script_ct.append(Path(script_file).read_text())
-        data['content'] = '\n'.join(script_ct)
-    except Exception:
-        pass
-    return send_response(data, api)
-# AJAX
-
-
+@login_required
+@permission_required(Permissions.SCAN)
 @require_http_methods(['POST'])
 def instrument(request, api=False):
     """Instrument app with frida."""
-    data = {}
+    data = {
+        'status': 'failed',
+        'message': ''}
     try:
-        logger.info('Starting Instrumentation')
+        action = request.POST.get('frida_action', 'spawn')
+        pid = request.POST.get('pid')
+        new_pkg = request.POST.get('new_package')
         md5_hash = request.POST['hash']
         default_hooks = request.POST['default_hooks']
         auxiliary_hooks = request.POST['auxiliary_hooks']
@@ -118,28 +110,84 @@ def instrument(request, api=False):
         cls_trace = request.POST.get('class_trace')
         if cls_trace:
             extras['class_trace'] = cls_trace.strip()
+
         if (is_attack_pattern(default_hooks)
-                or not is_md5(md5_hash)):
+                or is_attack_pattern(auxiliary_hooks)
+                or not is_md5(md5_hash)
+                or action not in ('spawn', 'session', 'ps', 'get')
+                or (pid and action != 'session')
+                or (pid and (not pid.isdigit() or not new_pkg))
+                or (new_pkg and not strict_package_check(new_pkg))):
             return invalid_params(api)
-        package = get_package_name(md5_hash)
-        if not package:
+        identifier = _analysis_identifier(request, md5_hash)
+        package = get_package_name(md5_hash, identifier)
+        if not package and not new_pkg:
             return invalid_params(api)
         frida_obj = Frida(md5_hash,
                           package,
                           default_hooks.split(','),
                           auxiliary_hooks.split(','),
                           extras,
-                          code)
-        trd = threading.Thread(target=frida_obj.connect)
-        trd.daemon = True
-        trd.start()
-        data = {'status': 'ok'}
+                          code,
+                          identifier)
+        gadget_mode = is_gadget_analysis(md5_hash)
+        if gadget_mode and (action == 'ps' or pid):
+            return send_response({
+                'status': 'failed',
+                'message': (
+                    'Process enumeration and PID attachment are unavailable '
+                    'in Frida Gadget mode'
+                ),
+            }, api)
+        if action == 'spawn':
+            logger.info('Starting Instrumentation')
+            if not frida_obj.instrument():
+                return send_response({
+                    'status': 'failed',
+                    'message': (
+                        frida_obj.last_error
+                        or 'Unable to launch and instrument the app'
+                    ),
+                }, api)
+        elif action == 'ps':
+            logger.info('Enumerating running applications')
+            data['message'] = frida_obj.ps()
+        elif action == 'get':
+            # Get injected Frida script.
+            data['message'] = frida_obj.get_script(nolog=True)
+        if action in ('spawn', 'session'):
+            if pid and pid.isdigit():
+                # Attach to a different pid/bundle id
+                logger.info('Attaching to %s [PID: %s]', new_pkg, pid)
+                if not frida_obj.instrument(int(pid), new_pkg):
+                    return send_response({
+                        'status': 'failed',
+                        'message': (
+                            frida_obj.last_error
+                            or 'Unable to attach and inject Frida'
+                        ),
+                    }, api)
+            else:
+                if action == 'session':
+                    logger.info('Injecting to existing frida session')
+                    if not frida_obj.reuse_session():
+                        return send_response({
+                            'status': 'failed',
+                            'message': (
+                                frida_obj.last_error
+                                or 'No reusable Frida session is active'
+                            ),
+                        }, api)
+                    data['status'] = 'ok'
+                    return send_response(data, api)
+        data['status'] = 'ok'
     except Exception as exp:
         logger.exception('Instrumentation failed')
         data = {'status': 'failed', 'message': str(exp)}
     return send_response(data, api)
 
 
+@login_required
 def live_api(request, api=False):
     try:
         if api:
@@ -177,44 +225,6 @@ def live_api(request, api=False):
     except Exception:
         logger.exception('API monitor streaming')
         err = 'Error in API monitor streaming'
-        return print_n_send_error_response(request, err, api)
-
-
-def frida_logs(request, api=False):
-    try:
-        if api:
-            apphash = request.POST['hash']
-            stream = True
-        else:
-            apphash = request.GET.get('hash', '')
-            stream = request.GET.get('stream', '')
-        if not is_md5(apphash):
-            return invalid_params(api)
-        if stream:
-            apk_dir = os.path.join(settings.UPLD_DIR, apphash + '/')
-            frida_logs = os.path.join(apk_dir, 'mobsf_frida_out.txt')
-            data = {}
-            if not is_file_exists(frida_logs):
-                data = {
-                    'status': 'failed',
-                    'message': 'Data does not exist.'}
-                return send_response(data, api)
-            with open(frida_logs, 'r',
-                      encoding='utf8',
-                      errors='ignore') as flip:
-                data = {'data': flip.read()}
-            return send_response(data, api)
-        logger.info('Frida Logs live streaming')
-        template = 'dynamic_analysis/android/frida_logs.html'
-        return render(request,
-                      template,
-                      {'hash': apphash,
-                       'package': request.GET.get('package', ''),
-                       'version': settings.MOBSF_VER,
-                       'title': 'Live Frida logs'})
-    except Exception:
-        logger.exception('Frida log streaming')
-        err = 'Error in Frida log streaming'
         return print_n_send_error_response(request, err, api)
 
 
@@ -299,7 +309,7 @@ def apimon_analysis(app_dir):
     return api_details, strings
 
 
-def get_dependencies(package, checksum):
+def get_dependencies(package, checksum, identifier=None):
     """Get 3rd party dependencies at runtime."""
     frd = Frida(
         checksum,
@@ -308,13 +318,18 @@ def get_dependencies(package, checksum):
         ['get_dependencies'],
         None,
         None,
+        identifier,
     )
     location = Path(frd.deps)
     if location.exists():
         location.write_text('')
-    trd = threading.Thread(target=frd.connect)
-    trd.daemon = True
-    trd.start()
+    if frd.reuse_session(replace=False):
+        return True, ''
+    if frd.last_error:
+        return False, frd.last_error
+    if frd.instrument(completion_timeout=30):
+        return True, ''
+    return False, frd.last_error
 
 
 def dependency_analysis(package, app_dir):

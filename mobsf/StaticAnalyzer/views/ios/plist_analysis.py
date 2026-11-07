@@ -4,45 +4,146 @@
 import logging
 import os
 from plistlib import (
+    FMT_XML,
     dumps,
     load,
+    loads,
 )
+from pathlib import Path
 from re import sub
 
-from biplist import (
-    InvalidPlistException,
-    readPlist,
-    writePlistToString,
-)
+from openstep_parser import OpenStepDecoder
 
-from mobsf.MobSF.utils import is_file_exists
-from mobsf.StaticAnalyzer.views.ios.permission_analysis import (
+from mobsf.MobSF.security import (
+    is_path_traversal,
+    is_pipe_or_link,
+    is_safe_path,
+)
+from mobsf.MobSF.utils import (
+    append_scan_status,
+    find_key_in_dict,
+)
+from mobsf.StaticAnalyzer.views.ios.kb.permission_analysis import (
     check_permissions,
 )
 from mobsf.StaticAnalyzer.views.ios.app_transport_security import (
     check_transport_security,
 )
-from mobsf.StaticAnalyzer.views.shared_func import (
-    is_secret,
+from mobsf.StaticAnalyzer.views.common.secret_detection import (
+    detect_known_secrets,
+)
+from mobsf.StaticAnalyzer.views.common.shared_func import (
+    is_secret_key,
 )
 
 logger = logging.getLogger(__name__)
+SKIP_PATH = {'__MACOSX', 'Pods'}
+HIGH = 'high'
+WARNING = 'warning'
+INFO = 'info'
+SECURE = 'secure'
+
+
+def _safe_regular_file(root, candidate):
+    """Check that a discovered file is a contained, non-special file."""
+    root = Path(root)
+    candidate = Path(candidate)
+    try:
+        relative = candidate.relative_to(root)
+        return (
+            is_safe_path(root, candidate, relative)
+            and candidate.exists()
+            and candidate.is_file()
+            and not is_pipe_or_link(candidate)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def get_bundle_id(pobj, src):
+    """Get iOS Bundle ID from source.
+
+    Look up in Info.plist, entitlements, pbxproj
+    """
+    possible_ids = set()
+    skip_chars = ('$(', '${')
+
+    # From old Info.plist
+    bundle_id_og = pobj.get('CFBundleIdentifier', '')
+    if (not any(tmpl in bundle_id_og for tmpl in skip_chars)
+            and len(bundle_id_og) > 1):
+        possible_ids.add(bundle_id_og)
+
+    # Look in entitlements, only present in newer iOS source
+    path = Path(src)
+    for p in path.rglob('*.entitlements'):
+        if not _safe_regular_file(path, p):
+            continue
+        if any(x in p.resolve().as_posix() for x in SKIP_PATH):
+            continue
+        try:
+            ent = loads(p.read_bytes())
+            groups = ent.get('com.apple.security.application-groups')
+            if not groups:
+                continue
+            for i in groups:
+                t = i.replace('.group', '').replace('group.', '')
+                possible_ids.add(t.strip())
+        except Exception:
+            logger.warning('Error in parsing .entitlements')
+
+    # Look in project.pbxproj
+    for p in path.rglob('*.pbxproj'):
+        if not _safe_regular_file(path, p):
+            continue
+        if any(x in p.resolve().as_posix() for x in SKIP_PATH):
+            continue
+        try:
+            search = 'PRODUCT_BUNDLE_IDENTIFIER'
+            parsed = OpenStepDecoder.ParseFromString(p.read_text())
+            if not parsed:
+                continue
+            for i in find_key_in_dict(search, parsed):
+                if i.startswith(skip_chars):
+                    continue
+                for spl in skip_chars:
+                    tc = f'.{spl}'
+                    if tc in i:
+                        i = i.split(tc)[0]
+                possible_ids.add(i)
+        except Exception:
+            logger.warning('Error in parsing .pbxproj')
+    if possible_ids:
+        possible_ids = filter(None, possible_ids)
+        # Fuzzy logic: return the shortest bundle id string
+        return min(possible_ids, key=len)
+    return ''
 
 
 def convert_bin_xml(bin_xml_file):
     """Convert Binary XML to Readable XML."""
     try:
-        plist_obj = readPlist(bin_xml_file)
-        data = writePlistToString(plist_obj)
-        return data
-    except InvalidPlistException:
+        bin_xml_file = Path(bin_xml_file)
+        if (not bin_xml_file.exists()
+                or not bin_xml_file.is_file()
+                or is_pipe_or_link(bin_xml_file)):
+            return
+        with open(bin_xml_file, 'rb') as fp:
+            plist_obj = load(fp)
+
+        # Serializing the plist object to a binary plist string
+        data = dumps(plist_obj, fmt=FMT_XML)
+        Path(bin_xml_file).write_bytes(data)
+    except Exception:
         logger.warning('Failed to convert plist')
 
 
-def plist_analysis(src, is_source):
+def plist_analysis(checksum, src, scan_type, app_root=None):
     """Plist Analysis."""
     try:
-        logger.info('iOS Info.plist Analysis Started')
+        msg = 'iOS Info.plist Analysis Started'
+        logger.info(msg)
+        append_scan_status(checksum, msg)
         plist_info = {
             'bin_name': '',
             'bin': '',
@@ -54,7 +155,7 @@ def plist_analysis(src, is_source):
             'min': '',
             'plist_xml': '',
             'permissions': {},
-            'inseccon': [],
+            'inseccon': {},
             'bundle_name': '',
             'build_version_name': '',
             'bundle_url_types': [],
@@ -63,29 +164,40 @@ def plist_analysis(src, is_source):
         }
         plist_file = None
         plist_files = []
-        if is_source:
-            logger.info('Finding Info.plist in iOS Source')
+        if scan_type == 'zip':
+            msg = 'Finding Info.plist in iOS Source'
+            logger.info(msg)
+            append_scan_status(checksum, msg)
             for dirpath, _dirnames, files in os.walk(src):
                 for name in files:
-                    if (not any(x in dirpath for x in ['__MACOSX', 'Pods'])
+                    if (not any(x in dirpath for x in SKIP_PATH)
                             and name.endswith('.plist')):
                         plist_files.append(os.path.join(dirpath, name))
-                        if name == 'Info.plist':
+                        if name == 'GoogleService-Info.plist':
+                            continue
+                        if name == 'Info.plist' or '-Info.plist' in name:
                             plist_file = os.path.join(dirpath, name)
         else:
-            logger.info('Finding Info.plist in iOS Binary')
-            dirs = os.listdir(src)
-            dot_app_dir = ''
-            for dir_ in dirs:
-                if dir_.endswith('.app'):
-                    dot_app_dir = dir_
-                    break
-            bin_dir = os.path.join(src, dot_app_dir)  # Full Dir/Payload/x.app
+            msg = 'Finding Info.plist in iOS Binary'
+            logger.info(msg)
+            append_scan_status(checksum, msg)
+            if app_root:
+                bin_dir = app_root
+                dot_app_dir = Path(app_root).name
+            else:
+                dirs = os.listdir(src)
+                dot_app_dir = ''
+                for dir_ in dirs:
+                    if dir_.endswith('.app'):
+                        dot_app_dir = dir_
+                        break
+                # Full Dir/Payload/x.app
+                bin_dir = os.path.join(src, dot_app_dir)
             plist_file = os.path.join(bin_dir, 'Info.plist')
             plist_files = [plist_file]
-
         # Skip Plist Analysis if there is no Info.plist
-        if not plist_file or not is_file_exists(plist_file):
+        plist_root = Path(app_root) if app_root else Path(src)
+        if not plist_file or not _safe_regular_file(plist_root, plist_file):
             logger.warning(
                 'Cannot find Info.plist file. Skipping Plist Analysis.')
             return plist_info
@@ -94,15 +206,23 @@ def plist_analysis(src, is_source):
         plist_obj = {}
         with open(plist_file, 'rb') as fp:
             plist_obj = load(fp)
-        plist_info['plist_xml'] = dumps(
-            plist_obj).decode('utf-8', 'ignore')
+        try:
+            pxml = dumps(plist_obj).decode('utf-8', 'ignore')
+        except Exception:
+            logger.error('Failed to dump plist XML')
+            pxml = ''
+        plist_info['plist_xml'] = pxml
         plist_info['bin_name'] = (plist_obj.get('CFBundleDisplayName', '')
                                   or plist_obj.get('CFBundleName', ''))
-        if not plist_info['bin_name'] and not is_source:
+        if not plist_info['bin_name'] and scan_type == 'ipa':
             # For iOS IPA
             plist_info['bin_name'] = dot_app_dir.replace('.app', '')
-        plist_info['bin'] = plist_obj.get('CFBundleExecutable', '')
-        plist_info['id'] = plist_obj.get('CFBundleIdentifier', '')
+        executable = plist_obj.get('CFBundleExecutable', '')
+        if is_path_traversal(executable):
+            logger.warning('Unsafe CFBundleExecutable value')
+            executable = ''
+        plist_info['bin'] = executable
+        plist_info['id'] = get_bundle_id(plist_obj, src)
         plist_info['build'] = plist_obj.get('CFBundleVersion', '')
         plist_info['sdk'] = plist_obj.get('DTSDKName', '')
         plist_info['pltfm'] = plist_obj.get('DTPlatformVersion', '')
@@ -110,41 +230,78 @@ def plist_analysis(src, is_source):
         plist_info['bundle_name'] = plist_obj.get('CFBundleName', '')
         plist_info['bundle_version_name'] = plist_obj.get(
             'CFBundleShortVersionString', '')
-        plist_info['bundle_url_types'] = plist_obj.get(
-            'CFBundleURLTypes', [])
+        btype = plist_obj.get('CFBundleURLTypes', [])
+        if btype and isinstance(btype, dict):
+            # Fixes bugs like # 1885
+            btype = [btype]
+        plist_info['bundle_url_types'] = btype
         plist_info['bundle_supported_platforms'] = plist_obj.get(
             'CFBundleSupportedPlatforms', [])
         logger.info('Checking Permissions')
         logger.info('Checking for Insecure Connections')
+        ats = []
         for plist_file_ in plist_files:
+            if not _safe_regular_file(plist_root, plist_file_):
+                continue
             plist_obj_ = {}
             with open(plist_file_, 'rb') as fp:
                 plist_obj_ = load(fp)
             # Check for app-permissions
             plist_info['permissions'].update(check_permissions(plist_obj_))
             # Check for ats misconfigurations
-            plist_info['inseccon'] += check_transport_security(plist_obj_)
+            ats += check_transport_security(plist_obj_)
+        plist_info['inseccon'] = {
+            'ats_findings': ats,
+            'ats_summary': get_summary(ats),
+        }
         return plist_info
-    except Exception:
-        logger.exception('Reading from Info.plist')
+    except Exception as exp:
+        msg = 'Reading from Info.plist'
+        logger.exception(msg)
+        append_scan_status(checksum, msg, repr(exp))
 
 
-def get_plist_secrets(xml_string):
-    """Get possible hardcoded secrets from plist."""
-    result_list = []
+def get_summary(ats):
+    """Get ATS finding summary."""
+    if len(ats) == 0:
+        return {}
+    summary = {HIGH: 0, WARNING: 0, INFO: 0, SECURE: 0}
+    for i in ats:
+        if i['severity'] == HIGH:
+            summary[HIGH] += 1
+        elif i['severity'] == WARNING:
+            summary[WARNING] += 1
+        elif i['severity'] == INFO:
+            summary[INFO] += 1
+        elif i['severity'] == SECURE:
+            summary[SECURE] += 1
+    return summary
+
+
+def get_plist_secrets(checksum, app_dir):
+    """Get possible hardcoded secrets from plist files."""
+    msg = 'Searching for secrets in plist files'
+    logger.info(msg)
+    append_scan_status(checksum, msg)
+    result_list = set()
 
     def _remove_tags(data):
         """Remove tags from input."""
         return sub('<[^<]+>', '', data).strip()
 
-    xml_list = xml_string.split('\n')
-
-    for index, line in enumerate(xml_list):
-        if '<key>' in line and is_secret(_remove_tags(line)):
-            nxt = index + 1
-            value = (
-                _remove_tags(xml_list[nxt])if nxt < len(xml_list) else False)
-            if value:
-                result_list.append(
-                    f'{_remove_tags(line)} : {_remove_tags(value)}')
-    return result_list
+    for i in Path(app_dir).rglob('*.plist'):
+        if not _safe_regular_file(app_dir, i):
+            continue
+        xml_string = i.read_text('utf-8', 'ignore')
+        result_list.update(detect_known_secrets(xml_string))
+        xml_list = xml_string.split('\n')
+        for index, line in enumerate(xml_list):
+            if '<key>' in line and is_secret_key(_remove_tags(line)):
+                nxt = index + 1
+                value = (
+                    _remove_tags(
+                        xml_list[nxt])if nxt < len(xml_list) else False)
+                if value and ' ' not in value:
+                    result_list.add(
+                        f'{_remove_tags(line)} : {_remove_tags(value)}')
+    return list(result_list)

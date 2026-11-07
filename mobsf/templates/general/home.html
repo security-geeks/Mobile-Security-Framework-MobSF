@@ -13,127 +13,62 @@
       <link rel="stylesheet" href="{% static "adminlte/plugins/fontawesome-free/css/all.min.css" %}">
       <link rel="stylesheet" href="{% static "others/css/spinner.css" %}">
       <link rel="stylesheet" href="{% static "landing/css/home.css" %}">
-      <!-- Google Font: Source Sans Pro -->
-      <link href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700" rel="stylesheet">
    </head>
-   <body>
-   <div class="topnav">
-        <!-- Centered link -->
-        <div class="topnav-centered">
-            <a>
-               <img src="{% static "img/mobsf_logo.png" %}" width="20%" height="20%"/>
-           </a>
-           </div>
-           <!-- Left-aligned links (default) -->
-           <a href="{% url 'recent' %}">RECENT SCANS</a>
-           <a href="{% url 'dynamic' %}">DYNAMIC ANALYZER</a>
-   
-           <!-- Right-aligned links -->
-           <div class="topnav-right">
-               <a href="{% url 'api_docs' %}">API DOCS</a>
-               <a href="{% url 'about' %}">ABOUT</a>
-               <a>
-                <form action="/search" method="GET">
-                    <input name="md5" type="text" class="form-control" placeholder="Search MD5">
-                 </form>
-                </a>
-           </div>
+   <body class="text-center">
 
-        </div>
-      <div class="site-wrapper">
-         <div class="site-wrapper-inner">
-            <div class="cover-container">
-               <div class="masthead clearfix">
-                  <div align="center" class="inner">
-                  </div>
-               </div>
-               <div class="inner cover">
-                  <div style="visibility:hidden; opacity:0" id="drop">
-                     <div id="textnode">Drop anywhere!</div>
-                  </div>
-                  </br>
-                  <form id="upload_form" enctype="multipart/form-data" method="post">
-                     {% csrf_token %}
-                     <div class="fileUpload btn btn-default btn-lg" id="but">
-                        <input type="file" name="file" id="uploadFile" placeholder="Choose File" multiple>
-                        <span class="fas fa-cloud-upload-alt"></span>
-                        Upload &amp; Analyze
-                     </div>
-                     <br />
-                     <small><i>Drag &amp; Drop anywhere!</i></small>
-                     <h5 id="status"></h5>
-                     <progress id="progressBar" value="0" max="100" style="width:300px;visibility:hidden;" ></progress>
-                  </form>
-               </div>
-               <div class="mastfoot">
-                
-                  <input type="download" id="package" class="form-control" placeholder="Download & Scan by package name"/>
+    <div class="home-shell">
+        {% include "general/includes/landing_nav.html" %}
 
-
-                  <div class="inner">
-                     <h6> <a href="{% url 'recent' %}">RECENT SCANS</a>  |  <a href="{% url 'dynamic' %}">DYNAMIC ANALYZER</a>  |  <a href="{% url 'api_docs' %}">API DOCS</a>   |  <a href="https://opensecurity.in/donate">DONATE ♥</a> | <a href="{% url 'about' %}">ABOUT</a></h6>
-                     </br>
-                     <p>&copy; {% now "Y" %}  Mobile Security Framework - MobSF {{ version }}</p>
-                  </div>
-               </div>
+        <main role="main" class="home-main">
+            <div id="drop">
+                <div id="textnode">Drop anywhere!</div>
             </div>
-         </div>
-      </div>
+            <form id="upload_form" enctype="multipart/form-data" method="post">
+                {% csrf_token %}
+                <label class="fileUpload drop-zone" id="but">
+                    <input type="file" name="file" id="uploadFile" multiple>
+                    <span class="fas fa-cloud-upload-alt" aria-hidden="true"></span>
+                    <span class="drop-title">Upload &amp; Analyze</span>
+                    <small>Drag &amp; drop anywhere</small>
+                </label>
+                <h5 class="lead" id="status"></h5>
+                <progress id="progressBar" value="0" max="100"></progress>
+            </form>
+        </main>
 
-      <div class="hidden loading">
+        {% include "general/includes/landing_footer.html" %}
+    </div>
+
+    <!--Loading Ring-->
+    <div class="hidden loading">
         <div class='uil-ring-css' style='transform:scale(0.79);'>
           <div></div>
         </div>
-        </div>
+    </div>
 
-        <script src="{% static "adminlte/plugins/jquery.min.js" %}"></script>
+    <script src="{% static "adminlte/plugins/jquery.min.js" %}"></script>
+    <script src="{% static "adminlte/plugins/bootstrap/bootstrap.bundle.min.js" %}"></script>
       <script>
-
-            //Download and scan APK
-            $('#package').keypress(function(event){
-                var keycode = (event.keyCode ? event.keyCode : event.which);
-                if(keycode == '13'){
-                    show_loader();
-                    $.ajax({
-                        url : '../download_scan/', 
-                        type : "POST",
-                        dataType: "json", 
-                        data : {
-                            package: $('#package').val(),
-                            csrfmiddlewaretoken: '{{ csrf_token }}',
-                        },
-                        success : function(json){
-                            if (json.status === 'ok'){
-                                i = 1;
-                                setInterval(function() {
-                                    dot = '';
-                                    for (x = 1; x <= i; x++) {
-                                        dot += '.';
-                                    }
-                                    _("status").innerText = "Analyzing" + dot;
-                                    i += 1;
-                                    if (i == 5) {
-                                        i = 1;
-                                    }
-                                }, 2000);
-
-                                url = json.analyzer + '/?name=' + encodeURIComponent(json.file_name) + '&checksum=' + json.hash + '&type=' + json.scan_type
-                                window.location.href = window.location.href + url;
-                            } else {
-                                hide_loader();
-                                _("status").innerText = json.description;
-                            }
-                        },
-                        error : function(xhr, ajaxOptions, thrownError) {
-                            hide_loader();
-                        }
-                    });
-                }
-            });
-
-            function show_loader(){
-                var loadingOverlay = document.querySelector('.loading');
-                loadingOverlay.classList.remove('hidden');
+            let warning = "This is a demo MobSF instance. Anything uploaded here will be publicly available. Do you want to continue?";
+            var statusTimer = null;
+            var analysisStarted = false;
+            var statusPrefix = "";
+            var asyncScans = {{ async_scans|yesno:"true,false" }};
+            function show_started_alert(){
+                hide_loader();
+                var x = document.getElementById("alert");
+                x.className = "alert-bar show slide-up";
+                setTimeout(function () {
+                    x.className = x.className.replace("show", "");
+                }, 10000);
+            }
+            // Result View
+            function load_result(url){
+                show_started_alert();
+                // Redirect after showing alertbar
+                setTimeout(function () {
+                    window.location.href = url;
+                }, 1000); // Adjust delay as needed
             }
 
             function hide_loader(){
@@ -144,53 +79,223 @@
             function _(el){
                 return document.getElementById(el);
             }
-            // Response Handler     
+
+            // Response Handler
             function responseHandler(json, isbutton) {
                 if (json.status === 'error') {
                     _("status").innerText = json.description;
-                } else {
-                    i = 1;
-                    setInterval(function() {
-                        dot = '';
-                        for (x = 1; x <= i; x++) {
-                            dot += '.';
-                        }
-                        _("status").innerText = "Analyzing" + dot;
-                        i += 1;
-                        if (i == 5) {
-                            i = 1;
-                        }
-                    }, 2000);
-                    var url = json.analyzer + '/';
-                    if (json.hash){
-                        url += '?name=' + encodeURIComponent(json.file_name) + '&checksum=' + json.hash + '&type=' + json.scan_type
-                    }
-                    window.location.href = window.location.href + url;
+                    return;
                 }
+                // Stay on this page while the report request runs the scan.
+                // Navigating now freezes the last upload line for the whole analysis.
+                var url = json.analyzer + '/' + json.hash + '/';
+                analysisStarted = true;
+                statusPrefix = "";
+                _("status").innerText = asyncScans ? "Queueing scan ..." : "Analyzing ...";
+                show_started_alert();
+                if (statusTimer) {
+                    clearInterval(statusTimer);
+                    statusTimer = null;
+                }
+                if (!asyncScans) {
+                    statusTimer = setInterval(function() {
+                        get_status(json.hash);
+                    }, 500);
+                }
+                fetch(url, {credentials: 'same-origin', cache: 'no-store'})
+                    .catch(function() {})
+                    .then(function(response) {
+                        if (statusTimer) {
+                            clearInterval(statusTimer);
+                            statusTimer = null;
+                        }
+                        if (asyncScans && response && response.redirected && response.url) {
+                            window.location.href = response.url;
+                            return;
+                        }
+                        window.location.href = url;
+                    });
             }
+
+
+           // Get Scan status
+           function get_status(checksum){
+                var xhr = new XMLHttpRequest();
+                xhr.open("POST", '{% url "status" %}', true);
+                xhr.setRequestHeader("X-CSRFToken", '{{ csrf_token }}');
+                xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest')
+                xhr.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
+                xhr.onload = function() {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        var response = JSON.parse(xhr.responseText);
+                        if (response.status === 'ok' && Array.isArray(response.logs) && response.logs.length) {
+                            const last_log = response.logs[response.logs.length - 1];
+                            if (last_log && last_log.status && last_log.status !== 'init') {
+                                _("status").innerText = statusPrefix + last_log.status;
+                            }
+                        }
+                    } else {
+                        console.log("Error:", xhr.statusText);
+                    }
+                };
+                xhr.onerror = function() {
+                    console.log("Failed to get scan status");
+                };
+                xhr.send('hash=' + checksum);
+           }
+
+            var uploadPending = [];
+            var uploadResults = [];
+            var uploadActive = false;
+            var uploadDone = 0;
+            var uploadTotal = 0;
+
             function progressHandler(event) {
                 var percent = (event.loaded / event.total) * 100;
-                console.log("Uploaded..." + Math.round(percent));
-                _("progressBar").value = Math.round(percent);
-                _("status").innerText = Math.round(percent) + "% Uploaded...";
+                var rounded = Math.round(percent);
+                _("progressBar").value = rounded;
+                if (analysisStarted) {
+                    return;
+                }
+                if (uploadTotal > 1) {
+                    _("status").innerText = "Uploading " + uploadDone + " of " + uploadTotal + " — " + rounded + "%";
+                } else {
+                    _("status").innerText = rounded + "% Uploaded ...";
+                }
+            }
+            function isScanFailureResponse(response, text) {
+                if (!response || !response.ok) {
+                    return true;
+                }
+                if (typeof text !== "string") {
+                    return false;
+                }
+                return (
+                    text.indexOf("<title>Error</title>") !== -1
+                    || text.indexOf("<title>Invalid ZIP archive</title>") !== -1
+                );
+            }
+            async function runBatchScans(results) {
+                analysisStarted = true;
+                show_started_alert();
+                var total = results.length;
+                var failed = [];
+                var enqueuedCount = 0;
+                for (var i = 0; i < total; i++) {
+                    var item = results[i];
+                    var label = item.file_name || item.hash;
+                    var url = item.analyzer + '/' + item.hash + '/';
+                    _("progressBar").value = Math.round(((i + 1) / total) * 100);
+                    if (asyncScans) {
+                        statusPrefix = "";
+                        _("status").innerText = "Queueing " + (i + 1) + " of " + total + " (" + label + ") ...";
+                    } else {
+                        statusPrefix = "Analyzing " + (i + 1) + " of " + total + " (" + label + ") — ";
+                        _("status").innerText = statusPrefix + "Starting ...";
+                        if (statusTimer) {
+                            clearInterval(statusTimer);
+                        }
+                        statusTimer = setInterval((function(hash) {
+                            return function() {
+                                get_status(hash);
+                            };
+                        })(item.hash), 500);
+                    }
+                    try {
+                        var response = await fetch(url, {
+                            credentials: 'same-origin',
+                            cache: 'no-store',
+                        });
+                        var bodyText = response ? await response.text() : "";
+                        if (isScanFailureResponse(response, bodyText)) {
+                            failed.push(label);
+                        } else if (response.redirected && response.url && response.url.indexOf('/tasks') !== -1) {
+                            enqueuedCount += 1;
+                        }
+                    } catch (err) {
+                        failed.push(label);
+                    }
+                    if (statusTimer) {
+                        clearInterval(statusTimer);
+                        statusTimer = null;
+                    }
+                }
+                statusPrefix = "";
+                var targetUrl = enqueuedCount > 0 ? '{% url "list_tasks" %}' : '{% url "recent" %}';
+                if (failed.length === total) {
+                    analysisStarted = false;
+                    _("progressBar").style.visibility = "hidden";
+                    _("status").innerText = "Scan failed for: " + failed.join(", ");
+                    return;
+                }
+                if (failed.length > 0) {
+                    _("status").innerText = (
+                        "Completed " + (total - failed.length) + " of " + total
+                        + " scans (" + failed.length + " failed: " + failed.join(", ") + "). Redirecting ..."
+                    );
+                    setTimeout(function() {
+                        window.location.href = targetUrl;
+                    }, 2500);
+                    return;
+                }
+                window.location.href = targetUrl;
+            }
+            function finishUploads() {
+                var results = uploadResults.slice();
+                uploadResults = [];
+                if (!results.length) {
+                    _("progressBar").style.visibility = "hidden";
+                    return;
+                }
+                // One file keeps the report redirect. Several files trigger
+                // each scan (or enqueue in async mode) before redirecting.
+                if (results.length === 1 && uploadTotal === 1) {
+                    responseHandler(results[0]);
+                    return;
+                }
+                runBatchScans(results);
+            }
+            function noteUploadFailure(message) {
+                _("status").innerText = message;
+                startNextUpload();
             }
             function completeHandler(event) {
-                var json = JSON.parse(event.target.responseText);
-                responseHandler(json);
+                if (event.currentTarget.status === 403) {
+                    uploadPending = [];
+                    uploadActive = false;
+                    _("status").innerText = "You do not have permission to upload!";
+                    if (uploadResults.length) {
+                        finishUploads();
+                    } else {
+                        _("progressBar").style.visibility = "hidden";
+                    }
+                    return;
+                }
+                try {
+                    var json = JSON.parse(event.target.responseText);
+                    if (json.status === 'error') {
+                        noteUploadFailure(json.description || "Upload Failed!");
+                        return;
+                    }
+                    uploadResults.push(json);
+                    startNextUpload();
+                } catch (error) {
+                    noteUploadFailure("Upload Failed!");
+                }
             }
             function errorHandler(event) {
-                _("status").innerText = "Upload Failed!";
+                noteUploadFailure("Upload Failed!");
             }
             function abortHandler(event) {
-                _("status").innerText = "Upload Aborted!";
+                noteUploadFailure("Upload Aborted!");
             }
           // Is valid file extensions
           function isValidExt(file_name){
                 var val = file_name.toLowerCase();
-                var regex = new RegExp("(.*?)\.(ipa|apk|apks|xapk|zip|appx)$");
+                var regex = new RegExp("^(.{1,300}?)\.({{exts}})$");
                 val = val.replace(/^.*[\\\/]/, '');
                 if (!(regex.test(val))) {
-                    _('status').innerText = "Please upload APK/APKS/XAPK/IPA/ZIP/APPX only!";
+                    _('status').innerText = "MobSF only supports APK, APKS, XAPK, AAB, JAR, AAR, DEX, SO, IPA, DYLIB, A, ZIP, and APPX files.";
                     return false;
                 }
                 return true;
@@ -207,13 +312,20 @@
                 return false;
           }
          // File Upload
-         function uploadFile(file, i) {
+         function uploadFile(file) {
            try {
                 if (!isValidExt(file.name) || !isValidMime(file.type)){
+                    startNextUpload();
                     return;
                 }
+                _("progressBar").value = 0;
                 _("progressBar").style.visibility = "visible";
-                var url = '/upload/'
+                if (uploadTotal > 1) {
+                    _("status").innerText = "Uploading " + uploadDone + " of " + uploadTotal + "...";
+                } else {
+                    _("status").innerText = "Uploading ...";
+                }
+                var url = '{% url "upload" %}'
                 var xhr = new XMLHttpRequest()
                 xhr.open('POST', url, true)
                 xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest')
@@ -227,12 +339,48 @@
                 xhr.send(formdata)
             } catch (e) {
                 alert("Error:" + e);
+                startNextUpload();
             }
            }
-         
+
+           function startNextUpload() {
+                if (!uploadPending.length) {
+                    uploadActive = false;
+                    finishUploads();
+                    return;
+                }
+                var file = uploadPending.shift();
+                uploadDone += 1;
+                uploadFile(file);
+           }
+
+           function queueUploads(fileList) {
+                var accepted = [];
+                Array.prototype.forEach.call(fileList, function(file) {
+                    if (isValidExt(file.name) && isValidMime(file.type)) {
+                        accepted.push(file);
+                    }
+                });
+                if (!accepted.length) {
+                    return;
+                }
+                if (!uploadActive) {
+                    uploadPending = [];
+                    uploadResults = [];
+                    uploadDone = 0;
+                    uploadTotal = 0;
+                    uploadActive = true;
+                }
+                var starting = !uploadPending.length && uploadDone === 0;
+                uploadPending = uploadPending.concat(accepted);
+                uploadTotal += accepted.length;
+                if (starting) {
+                    startNextUpload();
+                }
+           }
+
            function handleFiles(files) {
-               files = [...files]
-               files.forEach(uploadFile)
+               queueUploads(files);
            }
          
            // Full Screen Drag & Drop File Upload
@@ -251,7 +399,7 @@
            window.addEventListener("dragenter", function (e) {
                if (isFile(e)) {
                    lastTarget = e.target;
-                   document.querySelector("#drop").style.visibility = "";
+                   document.querySelector("#drop").style.visibility = "visible";
                    document.querySelector("#drop").style.opacity = 1;
                    document.querySelector("#textnode").style.fontSize = "48px";
                }
@@ -275,9 +423,16 @@
                document.querySelector("#drop").style.visibility = "hidden";
                document.querySelector("#drop").style.opacity = 0;
                document.querySelector("#textnode").style.fontSize = "42px";
-               if(e.dataTransfer.files.length > 0)
-               {
-               handleFiles(e.dataTransfer.files);
+               if(e.dataTransfer.files.length > 0) {
+                if (document.location.host === 'mobsf.live'){
+                    if (confirm(warning) == true) {
+                        handleFiles(e.dataTransfer.files);
+                    } else {
+                        return;
+                    }
+                } else {
+                    handleFiles(e.dataTransfer.files);
+                }
                }
            });
 
@@ -288,9 +443,18 @@
                     if (_("uploadFile").files.length === 0) {
                         return;
                     }
-                    _("uploadFile").style.display = "none";
                     var files = _("uploadFile").files;
-                    handleFiles(files);
+                    if (document.location.host === 'mobsf.live'){
+                        if (confirm(warning) == true) {
+                            _("uploadFile").style.display = "none";
+                            handleFiles(files);
+                        } else {
+                            return;
+                        }
+                    } else {
+                        _("uploadFile").style.display = "none";
+                        handleFiles(files);
+                    }
                 });
             });
       </script>
